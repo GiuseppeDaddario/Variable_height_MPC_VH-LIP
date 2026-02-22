@@ -45,10 +45,10 @@ class Ismpc:
     self.opt = cs.Opti('conic')
     self.opt.solver("osqp", p_opts, s_opts)
 
-    self.X = self.opt.variable(8, self.N + 1)
-    self.U = self.opt.variable(3, self.N) # [ẋz, ẏz, fz]
+    self.X = self.opt.variable(6, self.N + 1)
+    self.U = self.opt.variable(2, self.N) # [ẋz, ẏz]
     
-    self.x0_param = self.opt.parameter(8)
+    self.x0_param = self.opt.parameter(6)
     self.lambda_param = self.opt.parameter(1, self.N)
     self.zmp_x_mid_param = self.opt.parameter(self.N)
     self.zmp_y_mid_param = self.opt.parameter(self.N)
@@ -62,21 +62,23 @@ class Ismpc:
           cs.horzcat(0,   0,  0)
         )
 
-        A_z = cs.vertcat(
-          cs.horzcat(0, 1),
-          cs.horzcat(0, 0)
-        )
-        B_z = cs.vertcat(
-          0,
-          1/self.params['m']
-        )
+        A_lip_i = cs.DM.zeros(6, 6)
+        B_lip = cs.DM.zeros(6, 2)
+        drift = cs.DM.zeros(6, 1)
 
-        A_lip_i = cs.diagcat(A_xy, A_xy, A_z)
-        B_lip = cs.diagcat(cs.vertcat(0,0,1), cs.vertcat(0,0,1), B_z)
-        drift = cs.vertcat(0,0,0, 0,0,0, 0,-params['g'])
+        # x dynamics block
+        A_lip_i[0:3, 0:3] = A_xy
+        B_lip[0:3, 0] = cs.vertcat(0, 0, 1)
+
+        # y dynamics block
+        A_lip_i[3:6, 3:6] = A_xy
+        B_lip[3:6, 1] = cs.vertcat(0, 0, 1)
 
         # constrain dynamics
-        self.opt.subject_to(self.X[:, i + 1] == self.X[:, i] + self.delta * (A_lip_i @ self.X[:, i] + B_lip @ self.U[:, i] + drift))
+        self.opt.subject_to(
+           self.X[:, i + 1] == 
+           self.X[:, i] + self.delta * (A_lip_i @ self.X[:, i] + B_lip @ self.U[:, i])
+        )
 
     cost = cs.sumsqr(self.U) + \
            100 * cs.sumsqr(self.X[2, 1:].T - self.zmp_x_mid_param) + \
@@ -105,9 +107,10 @@ class Ismpc:
                       'zmp': {'pos': np.zeros(3), 'vel': np.zeros(3)}}
 
   def solve(self, current, t):
-    self.x = np.array([current['com']['pos'][0], current['com']['vel'][0], current['zmp']['pos'][0],
-                       current['com']['pos'][1], current['com']['vel'][1], current['zmp']['pos'][1],
-                       current['com']['pos'][2], current['com']['vel'][2]])
+    self.x = np.array([
+        current['com']['pos'][0], current['com']['vel'][0], current['zmp']['pos'][0],
+        current['com']['pos'][1], current['com']['vel'][1], current['zmp']['pos'][1]
+    ])
     
     mc_x, mc_y, mc_z = self.generate_moving_constraint(t)
 
@@ -133,6 +136,10 @@ class Ismpc:
     self.opt.set_value(self.zmp_x_mid_param, mc_x)
     self.opt.set_value(self.zmp_y_mid_param, mc_y)
 
+    self.opt.set_value(self.fz_param, Fz_pred.reshape(self.N))
+    self.opt.set_value(self.zc_param, Z_pred[0, :].reshape(self.N + 1))
+    self.opt.set_value(self.zc_dot_param, Z_pred[1, :].reshape(self.N + 1))
+
     sol = self.opt.solve()
     self.x = sol.value(self.X[:,1])
     self.u = sol.value(self.U[:,0])
@@ -141,15 +148,14 @@ class Ismpc:
     self.opt.set_initial(self.X, sol.value(self.X))
 
     # create output LIP state
-    self.lip_state['com']['pos'] = np.array([self.x[0], self.x[3], self.x[6]])
-    self.lip_state['com']['vel'] = np.array([self.x[1], self.x[4], self.x[7]])
+    self.lip_state['com']['pos'] = np.array([self.x[0], self.x[3], Z_pred[0, 1]])
+    self.lip_state['com']['vel'] = np.array([self.x[1], self.x[4], Z_pred[1, 1]])
     self.lip_state['zmp']['pos'] = np.array([self.x[2], self.x[5], mc_z[0]])
     self.lip_state['zmp']['vel'] = np.array([self.u[0], self.u[1], 0.0])
-    lam0 = self.params['g'] / self.h
     self.lip_state['com']['acc'] = np.array([
-      lam0 * (self.x[0] - self.x[2]),
-      lam0 * (self.x[3] - self.x[5]),
-      self.u[2]/self.params['m'] - self.params['g']
+      lambda_seq[0] * (self.x[0] - self.x[2]),
+      lambda_seq[0] * (self.x[3] - self.x[5]),
+      Fz_pred[0, 0] / self.params['m'] - self.params['g']
     ])
 
     contact = self.footstep_planner.get_phase_at_time(t)
