@@ -14,31 +14,44 @@ class Ismpc:
     self.footstep_planner = footstep_planner
     self.sigma = lambda t, t0, t1: np.clip((t - t0) / (t1 - t0), 0, 1) # piecewise linear sigmoidal function
 
-    # lip model matrices
-    self.A_lip = np.array([[0, 1, 0], [self.eta**2, 0, -self.eta**2], [0, 0, 0]])
-    self.B_lip = np.array([[0], [0], [1]])
-
-    # dynamics
-    self.f = lambda x, u: cs.vertcat(
-      self.A_lip @ x[0:3] + self.B_lip @ u[0],
-      self.A_lip @ x[3:6] + self.B_lip @ u[1],
-      self.A_lip @ x[6:9] + self.B_lip @ u[2] + np.array([0, - params['g'], 0]),
-    )
-
-    # optimization problem
-    self.opt = cs.Opti('conic')
+    # optimization options
     p_opts = {"expand": True}
     s_opts = {"max_iter": 1000, "verbose": False}
+
+    # QP-z optimization problem
+    self.opt_z = cs.Opti('conic')
+    self.opt_z.solver("osqp", p_opts, s_opts)
+
+    self.Z = self.opt_z.variable(2, self.N + 1)
+    self.Fz = self.opt_z.variable(1, self.N)
+
+    self.z0_param = self.opt_z.parameter(2)
+    self.z_ref_param = self.opt_z.parameter(self.N)
+    self.zz_param = self.opt_z.parameter(self.N) # z_z = z_mc
+
+    for i in range(self.N):
+        self.opt_z.subject_to(self.Z[0, i+1] == self.Z[0, i] + self.delta * self.Z[1, i])
+        self.opt_z.subject_to(self.Z[1, i+1] == self.Z[1, i] + self.delta * (self.Fz[0, i]/self.params['m'] - self.params['g']))
+
+    alpha = 1e-3
+    cost_z = 100 * cs.sumsqr(self.Z[0, 1:].T - self.z_ref_param) + alpha * cs.sumsqr(self.Fz)
+
+    self.opt_z.minimize(cost_z)
+
+    self.opt_z.subject_to(self.Z[:, 0] == self.z0_param) # initial state constraint
+    self.opt_z.subject_to(self.Fz >= 0) # unilateral GRF constraint
+
+    # QP-xy optimization problem
+    self.opt = cs.Opti('conic')
     self.opt.solver("osqp", p_opts, s_opts)
 
-    self.U = self.opt.variable(3, self.N)
-    self.X = self.opt.variable(9, self.N + 1)
-
-    self.x0_param = self.opt.parameter(9)
+    self.X = self.opt.variable(8, self.N + 1)
+    self.U = self.opt.variable(3, self.N) # [ẋz, ẏz, fz]
+    
+    self.x0_param = self.opt.parameter(8)
     self.lambda_param = self.opt.parameter(1, self.N)
     self.zmp_x_mid_param = self.opt.parameter(self.N)
     self.zmp_y_mid_param = self.opt.parameter(self.N)
-    self.zmp_z_mid_param = self.opt.parameter(self.N)
 
     for i in range(self.N):
         lam = self.lambda_param[0, i]
@@ -50,32 +63,32 @@ class Ismpc:
         )
 
         A_z = cs.vertcat(
-          cs.horzcat(0,           1,            0),
-          cs.horzcat(self.eta**2, 0, -self.eta**2),
-          cs.horzcat(0,           0,            0)
+          cs.horzcat(0, 1),
+          cs.horzcat(0, 0)
+        )
+        B_z = cs.vertcat(
+          0,
+          1/self.params['m']
         )
 
         A_lip_i = cs.diagcat(A_xy, A_xy, A_z)
-        B_lip = cs.diagcat(cs.vertcat(0,0,1), cs.vertcat(0,0,1), cs.vertcat(0,0,1))
-        drift = cs.vertcat(0,0,0, 0,0,0, 0,-params['g'],0)
+        B_lip = cs.diagcat(cs.vertcat(0,0,1), cs.vertcat(0,0,1), B_z)
+        drift = cs.vertcat(0,0,0, 0,0,0, 0,-params['g'])
 
         # constrain dynamics
         self.opt.subject_to(self.X[:, i + 1] == self.X[:, i] + self.delta * (A_lip_i @ self.X[:, i] + B_lip @ self.U[:, i] + drift))
 
     cost = cs.sumsqr(self.U) + \
            100 * cs.sumsqr(self.X[2, 1:].T - self.zmp_x_mid_param) + \
-           100 * cs.sumsqr(self.X[5, 1:].T - self.zmp_y_mid_param) + \
-           100 * cs.sumsqr(self.X[8, 1:].T - self.zmp_z_mid_param)
+           100 * cs.sumsqr(self.X[5, 1:].T - self.zmp_y_mid_param)
 
     self.opt.minimize(cost)
-
+    
     # zmp constraints
     self.opt.subject_to(self.X[2, 1:].T <= self.zmp_x_mid_param + self.foot_size / 2.)
     self.opt.subject_to(self.X[2, 1:].T >= self.zmp_x_mid_param - self.foot_size / 2.)
     self.opt.subject_to(self.X[5, 1:].T <= self.zmp_y_mid_param + self.foot_size / 2.)
     self.opt.subject_to(self.X[5, 1:].T >= self.zmp_y_mid_param - self.foot_size / 2.)
-    self.opt.subject_to(self.X[8, 1:].T <= self.zmp_z_mid_param + self.foot_size / 2.)
-    self.opt.subject_to(self.X[8, 1:].T >= self.zmp_z_mid_param - self.foot_size / 2.)
 
     # initial state constraint
     self.opt.subject_to(self.X[:, 0] == self.x0_param)
@@ -85,27 +98,40 @@ class Ismpc:
                         self.X[1, self.N] + self.eta * (self.X[0, self.N] - self.X[2, self.N]))
     self.opt.subject_to(self.X[4, 0     ] + self.eta * (self.X[3, 0     ] - self.X[5, 0     ]) == \
                         self.X[4, self.N] + self.eta * (self.X[3, self.N] - self.X[5, self.N]))
-    self.opt.subject_to(self.X[7, 0     ] + self.eta * (self.X[6, 0     ] - self.X[8, 0     ]) == \
-                        self.X[7, self.N] + self.eta * (self.X[6, self.N] - self.X[8, self.N]))
 
     # state
-    self.x = np.zeros(9)
+    self.x = np.zeros(8)
     self.lip_state = {'com': {'pos': np.zeros(3), 'vel': np.zeros(3), 'acc': np.zeros(3)},
                       'zmp': {'pos': np.zeros(3), 'vel': np.zeros(3)}}
 
   def solve(self, current, t):
     self.x = np.array([current['com']['pos'][0], current['com']['vel'][0], current['zmp']['pos'][0],
                        current['com']['pos'][1], current['com']['vel'][1], current['zmp']['pos'][1],
-                       current['com']['pos'][2], current['com']['vel'][2], current['zmp']['pos'][2]])
+                       current['com']['pos'][2], current['com']['vel'][2]])
     
     mc_x, mc_y, mc_z = self.generate_moving_constraint(t)
 
-    # solve optimization problem
+    # solve QP-z optimization problem
+    self.opt_z.set_value(self.z0_param, np.array([current['com']['pos'][2], current['com']['vel'][2]]))
+    self.opt_z.set_value(self.z_ref_param, mc_z + self.h) # CoM height reference
+    self.opt_z.set_value(self.zz_param, mc_z)
+
+    sol_z = self.opt_z.solve()
+    Z_pred = sol_z.value(self.Z)
+    Fz_pred = sol_z.value(self.Fz)
+
+    self.opt_z.set_initial(self.Z, Z_pred)
+    self.opt_z.set_initial(self.Fz, Fz_pred)
+
+    # compute lambda over horizon (1, N)
+    den = (Z_pred[0, 0:self.N] - mc_z)
+    lambda_seq = (Fz_pred[0, :] / self.params['m']) / den
+
+    # solve QP-xy optimization problem
     self.opt.set_value(self.x0_param, self.x)
-    self.opt.set_value(self.lambda_param, np.full((1, self.N), self.params['g']/self.h))
+    self.opt.set_value(self.lambda_param, lambda_seq.reshape(1, self.N))
     self.opt.set_value(self.zmp_x_mid_param, mc_x)
     self.opt.set_value(self.zmp_y_mid_param, mc_y)
-    self.opt.set_value(self.zmp_z_mid_param, mc_z)
 
     sol = self.opt.solve()
     self.x = sol.value(self.X[:,1])
@@ -117,9 +143,14 @@ class Ismpc:
     # create output LIP state
     self.lip_state['com']['pos'] = np.array([self.x[0], self.x[3], self.x[6]])
     self.lip_state['com']['vel'] = np.array([self.x[1], self.x[4], self.x[7]])
-    self.lip_state['zmp']['pos'] = np.array([self.x[2], self.x[5], self.x[8]])
-    self.lip_state['zmp']['vel'] = self.u
-    self.lip_state['com']['acc'] = self.eta**2 * (self.lip_state['com']['pos'] - self.lip_state['zmp']['pos']) + np.hstack([0, 0, - self.params['g']])
+    self.lip_state['zmp']['pos'] = np.array([self.x[2], self.x[5], mc_z[0]])
+    self.lip_state['zmp']['vel'] = np.array([self.u[0], self.u[1], 0.0])
+    lam0 = self.params['g'] / self.h
+    self.lip_state['com']['acc'] = np.array([
+      lam0 * (self.x[0] - self.x[2]),
+      lam0 * (self.x[3] - self.x[5]),
+      self.u[2]/self.params['m'] - self.params['g']
+    ])
 
     contact = self.footstep_planner.get_phase_at_time(t)
     if contact == 'ss':
