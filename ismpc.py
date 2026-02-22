@@ -35,12 +35,32 @@ class Ismpc:
     self.X = self.opt.variable(9, self.N + 1)
 
     self.x0_param = self.opt.parameter(9)
+    self.lambda_param = self.opt.parameter(1, self.N)
     self.zmp_x_mid_param = self.opt.parameter(self.N)
     self.zmp_y_mid_param = self.opt.parameter(self.N)
     self.zmp_z_mid_param = self.opt.parameter(self.N)
 
     for i in range(self.N):
-      self.opt.subject_to(self.X[:, i + 1] == self.X[:, i] + self.delta * self.f(self.X[:, i], self.U[:, i]))
+        lam = self.lambda_param[0, i]
+
+        A_xy = cs.vertcat(
+          cs.horzcat(0,   1,  0),
+          cs.horzcat(lam, 0, -lam),
+          cs.horzcat(0,   0,  0)
+        )
+
+        A_z = cs.vertcat(
+          cs.horzcat(0,           1,            0),
+          cs.horzcat(self.eta**2, 0, -self.eta**2),
+          cs.horzcat(0,           0,            0)
+        )
+
+        A_lip_i = cs.diagcat(A_xy, A_xy, A_z)
+        B_lip = cs.diagcat(cs.vertcat(0,0,1), cs.vertcat(0,0,1), cs.vertcat(0,0,1))
+        drift = cs.vertcat(0,0,0, 0,0,0, 0,-params['g'],0)
+
+        # constrain dynamics
+        self.opt.subject_to(self.X[:, i + 1] == self.X[:, i] + self.delta * (A_lip_i @ self.X[:, i] + B_lip @ self.U[:, i] + drift))
 
     cost = cs.sumsqr(self.U) + \
            100 * cs.sumsqr(self.X[2, 1:].T - self.zmp_x_mid_param) + \
@@ -82,6 +102,7 @@ class Ismpc:
 
     # solve optimization problem
     self.opt.set_value(self.x0_param, self.x)
+    self.opt.set_value(self.lambda_param, np.full((1, self.N), self.params['g']/self.h))
     self.opt.set_value(self.zmp_x_mid_param, mc_x)
     self.opt.set_value(self.zmp_y_mid_param, mc_y)
     self.opt.set_value(self.zmp_z_mid_param, mc_z)
