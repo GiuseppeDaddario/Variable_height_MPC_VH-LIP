@@ -13,6 +13,8 @@ class Ismpc:
     self.initial = initial
     self.footstep_planner = footstep_planner
     self.sigma = lambda t, t0, t1: np.clip((t - t0) / (t1 - t0), 0, 1) # piecewise linear sigmoidal function
+    self.alpha_z = params['alpha_z']
+    self.beta_z = params['beta_z']
 
     # optimization options
     p_opts = {"expand": True}
@@ -29,17 +31,27 @@ class Ismpc:
     self.z_ref_param = self.opt_z.parameter(self.N)
     self.zz_param = self.opt_z.parameter(self.N) # z_z = z_mc
 
+    self.fz0_param = self.opt_z.parameter()
+    self.fz_min_param = self.opt_z.parameter()
+
     for i in range(self.N):
         self.opt_z.subject_to(self.Z[0, i+1] == self.Z[0, i] + self.delta * self.Z[1, i])
         self.opt_z.subject_to(self.Z[1, i+1] == self.Z[1, i] + self.delta * (self.Fz[0, i]/self.params['m'] - self.params['g']))
 
-    alpha = 1e-3
-    cost_z = 100 * cs.sumsqr(self.Z[0, 1:].T - self.z_ref_param) + alpha * cs.sumsqr(self.Fz)
-
+    Zc = self.Z[0, 0:self.N]  # predicted CoM height over horizon
+    Zcd = self.Z[1, 0:self.N] # predicted CoM vertical velocity over horizon
+    dF0 = self.Fz[0, 0] - self.fz0_param  # change wrt prev time step vertical GRF
+    dF = self.Fz[0, 1:] - self.Fz[0, :-1] # differences between consecutive forces
+    dF_all = cs.horzcat(dF0, dF)          # concat to penalize N force variations
+    cost_z = (
+       100 * cs.sumsqr(Zc - self.z_ref_param) + 
+       self.alpha_z * cs.sumsqr(Zcd) +
+       self.beta_z * cs.sumsqr(dF_all)
+    )
     self.opt_z.minimize(cost_z)
 
     self.opt_z.subject_to(self.Z[:, 0] == self.z0_param) # initial state constraint
-    self.opt_z.subject_to(self.Fz >= 0) # unilateral GRF constraint
+    self.opt_z.subject_to(self.Fz[0, :].T >= self.fz_min_param) # no-slip lower bound
 
     # QP-xy optimization problem
     self.opt = cs.Opti('conic')
@@ -52,6 +64,8 @@ class Ismpc:
     self.lambda_param = self.opt.parameter(1, self.N)
     self.zmp_x_mid_param = self.opt.parameter(self.N)
     self.zmp_y_mid_param = self.opt.parameter(self.N)
+    self.gamma_param = self.opt.parameter()
+    self.sqrt_lambda_param = self.opt.parameter(self.N)
 
     for i in range(self.N):
         lam = self.lambda_param[0, i]
@@ -95,16 +109,26 @@ class Ismpc:
     # initial state constraint
     self.opt.subject_to(self.X[:, 0] == self.x0_param)
 
-    # stability constraint with periodic tail
-    self.opt.subject_to(self.X[1, 0     ] + self.eta * (self.X[0, 0     ] - self.X[2, 0     ]) == \
-                        self.X[1, self.N] + self.eta * (self.X[0, self.N] - self.X[2, self.N]))
-    self.opt.subject_to(self.X[4, 0     ] + self.eta * (self.X[3, 0     ] - self.X[5, 0     ]) == \
-                        self.X[4, self.N] + self.eta * (self.X[3, self.N] - self.X[5, self.N]))
+    # x direction stability
+    self.opt.subject_to(
+        self.X[1,0] + self.sqrt_lambda_param[0]*(self.X[0,0]-self.X[2,0]) ==
+        self.gamma_param *
+        (self.X[1,self.N] + self.sqrt_lambda_param[self.N-1]*(self.X[0,self.N]-self.X[2,self.N]))
+    )
+
+    # y direction stability
+    self.opt.subject_to(
+        self.X[4,0] + self.sqrt_lambda_param[0]*(self.X[3,0]-self.X[5,0]) ==
+        self.gamma_param *
+        (self.X[4,self.N] + self.sqrt_lambda_param[self.N-1]*(self.X[3,self.N]-self.X[5,self.N]))
+    )
 
     # state
-    self.x = np.zeros(8)
+    self.x = np.zeros(6)
     self.lip_state = {'com': {'pos': np.zeros(3), 'vel': np.zeros(3), 'acc': np.zeros(3)},
                       'zmp': {'pos': np.zeros(3), 'vel': np.zeros(3)}}
+    
+    self.fz_last = self.params['m'] * self.params['g'] # prev applied fz
 
   def solve(self, current, t):
     self.x = np.array([
@@ -119,9 +143,15 @@ class Ismpc:
     self.opt_z.set_value(self.z_ref_param, mc_z + self.h) # CoM height reference
     self.opt_z.set_value(self.zz_param, mc_z)
 
+    fz_min = (self.params['m'] / self.params['mu']) * self.params['a_max']
+    self.opt_z.set_value(self.fz0_param, self.fz_last)
+    self.opt_z.set_value(self.fz_min_param, fz_min)
+
     sol_z = self.opt_z.solve()
     Z_pred = sol_z.value(self.Z)
     Fz_pred = sol_z.value(self.Fz)
+
+    self.fz_last = float(Fz_pred[0, 0]) # store first fz
 
     self.opt_z.set_initial(self.Z, Z_pred)
     self.opt_z.set_initial(self.Fz, Fz_pred)
@@ -129,6 +159,7 @@ class Ismpc:
     # compute lambda over horizon (1, N)
     den = (Z_pred[0, 0:self.N] - mc_z)
     lambda_seq = (Fz_pred[0, :] / self.params['m']) / den
+    gamma = np.exp(-np.sum(np.sqrt(lambda_seq)) * self.delta) # exponential decay factor for stability constraint
 
     # solve QP-xy optimization problem
     self.opt.set_value(self.x0_param, self.x)
@@ -136,9 +167,8 @@ class Ismpc:
     self.opt.set_value(self.zmp_x_mid_param, mc_x)
     self.opt.set_value(self.zmp_y_mid_param, mc_y)
 
-    self.opt.set_value(self.fz_param, Fz_pred.reshape(self.N))
-    self.opt.set_value(self.zc_param, Z_pred[0, :].reshape(self.N + 1))
-    self.opt.set_value(self.zc_dot_param, Z_pred[1, :].reshape(self.N + 1))
+    self.opt.set_value(self.gamma_param, gamma)
+    self.opt.set_value(self.sqrt_lambda_param, np.sqrt(lambda_seq))
 
     sol = self.opt.solve()
     self.x = sol.value(self.X[:,1])
