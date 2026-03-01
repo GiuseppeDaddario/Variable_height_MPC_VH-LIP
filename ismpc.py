@@ -14,6 +14,12 @@ class Ismpc:
     self.footstep_planner = footstep_planner
     self.sigma = lambda t, t0, t1: np.clip((t - t0) / (t1 - t0), 0, 1) # piecewise linear sigmoidal function
 
+    self.g = self.params["g"]
+    self.m = self.params["m"]
+    self.fz_min = self.params["fz_min"]
+    self.alpha_z = self.params["alpha_z"]
+    self.beta_z = self.params["beta_z"]
+
     # lip model matrices
     #self.A_lip = np.array([[0, 1, 0], [self.eta**2, 0, -self.eta**2], [0, 0, 0]])
     #self.B_lip = np.array([[0], [0], [1]])    
@@ -98,6 +104,9 @@ class Ismpc:
     
     mc_x, mc_y, mc_z = self.generate_moving_constraint(t)
 
+    # ADD OF QP-z AND QP-xy
+    eta_seq, z_c, dz_c = self.qp_z(current, t)
+
     # solve optimization problem
     self.opt.set_value(self.x0_param, self.x)
     self.opt.set_value(self.zmp_x_mid_param, mc_x)
@@ -140,12 +149,70 @@ class Ismpc:
       mc_y += self.sigma(time_array, ds_start_time, fs_end_time) * (fs_target_pos[1] - fs_current_pos[1])
 
     return mc_x, mc_y, np.zeros(self.N)
+  
+  def generateHeightRef(self, t):
+    if True: 
+      return np.full(self.N, self.params['h'])
+    height_ref = np.zeros(self.N)
+    time_array = np.array(range(t, t + self.N))
+    for j in range(len(self.footstep_planner.plan) - 1):
+      fs_start_time = self.footstep_planner.get_start_time(j)
+      ds_start_time = fs_start_time + self.footstep_planner.plan[j]['ss_duration']
+      fs_end_time = ds_start_time + self.footstep_planner.plan[j]['ds_duration']
+      height_ref += self.sigma(time_array, ds_start_time, fs_end_time) * (self.params['h'] - self.initial['com']['pos'][2])
+
+    return height_ref
+
+  def generatePzRef(self, t):
+    pass
 
   def qp_z(self, current, t):
-    g = self.params["g"]
-    m = self.params["m"]
-    fz_min = self.params["fz_min"]
-    pass
+    z_ref = self.generateHeightRef(t)
+    _, _, pz = self.generate_moving_constraint(t)
+
+    opt = cs.Opti('conic')
+    p_opts = {"expand": True}
+    s_opts = {"max_iter": 1000, "verbose": False}
+    opt.solver("osqp", p_opts, s_opts)
+
+    F_z = opt.variable(self.N)
+    
+    z0 = current['com']['pos'][2]
+    dz0 = current['com']['vel'][2]
+
+    z = [z0]
+    dz = [dz0]
+    for k in range(self.N):
+      # Euler integration
+      dz.append(dz[-1] + self.delta * (F_z[k] / self.m - self.g))
+      z.append(z[-1] + self.delta * dz[-2]) 
+
+    Z = cs.vertcat(*z[1:]) 
+    dZ = cs.vertcat(*dz[1:])
+    DF_z = cs.diff(F_z)
+
+    cost = cs.sumsqr(Z - z_ref) + self.alpha_z * cs.sumsqr(dZ) + self.beta_z * cs.sumsqr(DF_z)
+    opt.minimize(cost)    
+    opt.subject_to(F_z >= self.fz_min)
+    
+    sol = opt.solve()
+    F_z_sol = sol.value(F_z)
+
+    z_sol = np.zeros(self.N + 1)
+    dz_sol = np.zeros(self.N + 1)
+    z_sol[0] = z0
+    dz_sol[0] = dz0
+    for k in range(self.N):
+      dz_sol[k + 1] = dz_sol[k] + self.delta * (F_z_sol[k] / self.m - self.g)
+      z_sol[k + 1] = z_sol[k] + self.delta * dz_sol[k]
+
+    ddz_sol = F_z_sol / self.m - self.g
+    denom = z_sol[:self.N] - pz
+    denom = np.maximum(denom, 1e-3) # prevent division by zero
+    eta_seq = np.sqrt((self.g + ddz_sol) / denom)
+
+    return eta_seq, z_sol, dz_sol
+
     
 
   def qp_x(self, current, t):

@@ -19,6 +19,8 @@ class Hrp4Controller(dart.gui.osg.RealTimeWorldNode):
         m = self.hrp4.getMass()
         mu = 0.5
         a_max = 10
+        alpha_z = 1e-5
+        beta_z = 1e-5
         self.params = {
             'g': 9.81,
             'h': 0.72,
@@ -33,7 +35,9 @@ class Hrp4Controller(dart.gui.osg.RealTimeWorldNode):
             'dof': self.hrp4.getNumDofs(),
 
             'm': m,
-            'fz_min': m * mu * a_max
+            'fz_min': m * mu * a_max,
+            'alpha_z': alpha_z,
+            'beta_z': beta_z,
         }
         self.params['eta'] = np.sqrt(self.params['g'] / self.params['h'])
 
