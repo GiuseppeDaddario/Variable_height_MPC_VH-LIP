@@ -142,7 +142,11 @@ class Ismpc:
     return mc_x, mc_y, np.zeros(self.N)
 
   def qp_z(self, current, t):
+    g = self.params["g"]
+    m = self.params["m"]
+    fz_min = self.params["fz_min"]
     pass
+    
 
   def qp_x(self, current, t):
     pass

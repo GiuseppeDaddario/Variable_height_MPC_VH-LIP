@@ -1,0 +1,15 @@
+## Todo list
+- [x] Update from LIP to VH-LIP 
+    - [ ] Test it
+- [ ] Through multiple iterations, find the best a_max
+- [ ] Implement MPC
+    - [ ] Implement QP-z
+    - [ ] Implement QP-xy
+    - [ ] Integrate them together
+    - [ ] Test the whole thing
+- [ ] Test walking 
+    - [ ] On flat ground
+    - [ ] On different surfaces
+- [ ] Test running
+    - [ ] On flat ground
+    - [ ] On different surfaces
