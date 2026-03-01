@@ -8,22 +8,22 @@ class Ismpc:
     self.N = params['N']
     self.delta = params['world_time_step']
     self.h = params['h']
-    self.eta = params['eta']
+    #self.eta = params['eta']
     self.foot_size = params['foot_size']
     self.initial = initial
     self.footstep_planner = footstep_planner
     self.sigma = lambda t, t0, t1: np.clip((t - t0) / (t1 - t0), 0, 1) # piecewise linear sigmoidal function
 
     # lip model matrices
-    self.A_lip = np.array([[0, 1, 0], [self.eta**2, 0, -self.eta**2], [0, 0, 0]])
-    self.B_lip = np.array([[0], [0], [1]])
+    #self.A_lip = np.array([[0, 1, 0], [self.eta**2, 0, -self.eta**2], [0, 0, 0]])
+    #self.B_lip = np.array([[0], [0], [1]])    
 
     # dynamics
-    self.f = lambda x, u: cs.vertcat(
-      self.A_lip @ x[0:3] + self.B_lip @ u[0],
-      self.A_lip @ x[3:6] + self.B_lip @ u[1],
-      self.A_lip @ x[6:9] + self.B_lip @ u[2] + np.array([0, - params['g'], 0]),
-    )
+    #self.f = lambda x, u: cs.vertcat(
+    #  self.A_lip @ x[0:3] + self.B_lip @ u[0],
+    #  self.A_lip @ x[3:6] + self.B_lip @ u[1],
+    #  self.A_lip @ x[6:9] + self.B_lip @ u[2] + np.array([0, - params['g'], 0]),
+    #)
 
     # optimization problem
     self.opt = cs.Opti('conic')
@@ -38,9 +38,27 @@ class Ismpc:
     self.zmp_x_mid_param = self.opt.parameter(self.N)
     self.zmp_y_mid_param = self.opt.parameter(self.N)
     self.zmp_z_mid_param = self.opt.parameter(self.N)
+    self.eta = self.opt.parameter(self.N)
 
+    #for i in range(self.N):
+    #  self.opt.subject_to(self.X[:, i + 1] == self.X[:, i] + self.delta * self.f(self.X[:, i], self.U[:, i]))
     for i in range(self.N):
-      self.opt.subject_to(self.X[:, i + 1] == self.X[:, i] + self.delta * self.f(self.X[:, i], self.U[:, i]))
+      eta_k = self.eta[i]
+      x_next = cs.vertcat(
+        # x - axis
+        self.X[0, i] + self.delta * self.X[1, i],
+        self.X[1, i] + self.delta * (eta_k**2 * (self.X[0, i] - self.X[2, i])),
+        self.X[2, i] + self.delta * self.U[0, i],
+        # y - axis
+        self.X[3, i] + self.delta * self.X[4, i],
+        self.X[4, i] + self.delta * (eta_k**2 * (self.X[3, i] - self.X[5, i])),
+        self.X[5, i] + self.delta * self.U[1, i],
+        # z - axis
+        self.X[6, i] + self.delta * self.X[7, i],
+        self.X[7, i] + self.delta * (eta_k**2 * (self.X[6, i] - self.X[8, i]) - params['g']),
+        self.X[8, i] + self.delta * self.U[2, i],
+      )
+      self.opt.subject_to(self.X[:, i + 1] == x_next)
 
     cost = cs.sumsqr(self.U) + \
            100 * cs.sumsqr(self.X[2, 1:].T - self.zmp_x_mid_param) + \
@@ -61,19 +79,19 @@ class Ismpc:
     self.opt.subject_to(self.X[:, 0] == self.x0_param)
 
     # stability constraint with periodic tail
-    self.opt.subject_to(self.X[1, 0     ] + self.eta * (self.X[0, 0     ] - self.X[2, 0     ]) == \
-                        self.X[1, self.N] + self.eta * (self.X[0, self.N] - self.X[2, self.N]))
-    self.opt.subject_to(self.X[4, 0     ] + self.eta * (self.X[3, 0     ] - self.X[5, 0     ]) == \
-                        self.X[4, self.N] + self.eta * (self.X[3, self.N] - self.X[5, self.N]))
-    self.opt.subject_to(self.X[7, 0     ] + self.eta * (self.X[6, 0     ] - self.X[8, 0     ]) == \
-                        self.X[7, self.N] + self.eta * (self.X[6, self.N] - self.X[8, self.N]))
+    self.opt.subject_to(self.X[1, 0     ] + self.eta[0] * (self.X[0, 0     ] - self.X[2, 0     ]) == \
+                        self.X[1, self.N] + self.eta[self.N-1] * (self.X[0, self.N] - self.X[2, self.N]))
+    self.opt.subject_to(self.X[4, 0     ] + self.eta[0] * (self.X[3, 0     ] - self.X[5, 0     ]) == \
+                        self.X[4, self.N] + self.eta[self.N-1] * (self.X[3, self.N] - self.X[5, self.N]))
+    self.opt.subject_to(self.X[7, 0     ] + self.eta[0] * (self.X[6, 0     ] - self.X[8, 0     ]) == \
+                        self.X[7, self.N] + self.eta[self.N-1] * (self.X[6, self.N] - self.X[8, self.N]))
 
     # state
     self.x = np.zeros(9)
     self.lip_state = {'com': {'pos': np.zeros(3), 'vel': np.zeros(3), 'acc': np.zeros(3)},
                       'zmp': {'pos': np.zeros(3), 'vel': np.zeros(3)}}
 
-  def solve(self, current, t):
+  def solve(self, current, t, eta_seq):
     self.x = np.array([current['com']['pos'][0], current['com']['vel'][0], current['zmp']['pos'][0],
                        current['com']['pos'][1], current['com']['vel'][1], current['zmp']['pos'][1],
                        current['com']['pos'][2], current['com']['vel'][2], current['zmp']['pos'][2]])
@@ -85,6 +103,7 @@ class Ismpc:
     self.opt.set_value(self.zmp_x_mid_param, mc_x)
     self.opt.set_value(self.zmp_y_mid_param, mc_y)
     self.opt.set_value(self.zmp_z_mid_param, mc_z)
+    self.opt.set_value(self.eta, eta_seq)
 
     sol = self.opt.solve()
     self.x = sol.value(self.X[:,1])
@@ -98,7 +117,8 @@ class Ismpc:
     self.lip_state['com']['vel'] = np.array([self.x[1], self.x[4], self.x[7]])
     self.lip_state['zmp']['pos'] = np.array([self.x[2], self.x[5], self.x[8]])
     self.lip_state['zmp']['vel'] = self.u
-    self.lip_state['com']['acc'] = self.eta**2 * (self.lip_state['com']['pos'] - self.lip_state['zmp']['pos']) + np.hstack([0, 0, - self.params['g']])
+    #self.lip_state['com']['acc'] = self.eta**2 * (self.lip_state['com']['pos'] - self.lip_state['zmp']['pos']) + np.hstack([0, 0, - self.params['g']])
+    self.lip_state['com']['acc'] = self.eta[0]**2 * (self.lip_state['com']['pos'] - self.lip_state['zmp']['pos']) + np.hstack([0, 0, - self.params['g']])
 
     contact = self.footstep_planner.get_phase_at_time(t)
     if contact == 'ss':
@@ -120,3 +140,13 @@ class Ismpc:
       mc_y += self.sigma(time_array, ds_start_time, fs_end_time) * (fs_target_pos[1] - fs_current_pos[1])
 
     return mc_x, mc_y, np.zeros(self.N)
+
+  def qp_z(self, current, t):
+    pass
+
+  def qp_x(self, current, t):
+    pass
+
+  def qp_y(self, current, t):
+    pass
+
