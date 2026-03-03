@@ -29,24 +29,30 @@ class Hrp4Controller(dart.gui.osg.RealTimeWorldNode):
 
         self.params = {
             'g': 9.81,
-            'h': 0.72,
-            'foot_size': 0.1,
+            'h': 0.72, # (Non esplicitato nei param del paper, ma 0.7-0.72 è corretto per HRP-4)
+            'foot_size': 0.08, # Aggiornato al paper
             'step_height': 0.02,
-            'ss_duration': 70,
-            'ds_duration': 30,
-            'world_time_step': world.getTimeStep(),
+            'ss_duration': 50, # Aggiornato al paper
+            'ds_duration': 20, # Aggiornato al paper
+            'world_time_step': world.getTimeStep(), # 0.01s
             'first_swing': 'rfoot',
             'µ': mu,
-            'N': 100,
+            'N': 70, # Aggiornato al paper (0.7s)
             'dof': self.hrp4.getNumDofs(),
 
             'm': m,
-            'fz_min': m * mu * a_max,
-            'alpha_z': alpha_z,
-            'beta_z': beta_z,
-            'alpha_x': alpha_x,
-            'alpha_y': alpha_y,
-            'beta_x':  beta_x,
+            'fz_min': 114.0, # Aggiornato al paper
+            'alpha_z': 1e-5,
+            'beta_z': 1e-5,
+            'alpha_x': 1.0,  # Aggiornato al paper
+            'alpha_y': 1.0,  # Aggiornato al paper
+            'beta_x': 10000.0, # Aggiornato al paper
+            'beta_y': 10000.0,
+            
+            # Aggiunti limiti cinematici dal paper
+            'da_x': 1.0,
+            'da_y': 0.12,
+            'ell': 0.25
         }
         self.params['eta'] = np.sqrt(self.params['g'] / self.params['h'])
 

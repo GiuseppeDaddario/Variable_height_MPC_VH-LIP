@@ -10,6 +10,7 @@
 - [ ] Test walking 
     - [ ] On flat ground
     - [ ] On different surfaces
+    - [ ] On flat ground with different heights!!
 - [ ] Test running
     - [ ] On flat ground
     - [ ] On different surfaces
