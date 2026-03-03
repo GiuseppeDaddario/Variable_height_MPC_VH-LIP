@@ -31,10 +31,32 @@ class Ismpc:
     #  self.A_lip @ x[6:9] + self.B_lip @ u[2] + np.array([0, - params['g'], 0]),
     #)
 
-    # optimization problem
-    self.opt = cs.Opti('conic')
     p_opts = {"expand": True}
     s_opts = {"max_iter": 1000, "verbose": False}
+
+    self.opt_z = cs.Opti('conic')
+    self.opt_z.solver("osqp", p_opts, s_opts)
+
+    self.Fz        = self.opt_z.variable(self.N)
+    self.z0_param  = self.opt_z.parameter()
+    self.dz0_param = self.opt_z.parameter()
+    self.z_ref_param = self.opt_z.parameter(self.N)
+
+    _z  = [self.z0_param]
+    _dz = [self.dz0_param]
+    for k in range(self.N):
+      _dz.append(_dz[-1] + self.delta * (self.Fz[k] / self.m - self.g))
+      _z.append(_z[-1]   + self.delta * _dz[-2])
+
+    _Z   = cs.vertcat(*_z[1:])
+    _dZ  = cs.vertcat(*_dz[1:])
+    _dFz = cs.diff(self.Fz)
+
+    cost_z = cs.sumsqr(_Z - self.z_ref_param) + self.alpha_z * cs.sumsqr(_dZ) + self.beta_z * cs.sumsqr(_dFz)
+    self.opt_z.minimize(cost_z)
+    self.opt_z.subject_to(self.Fz >= self.fz_min)
+
+    self.opt = cs.Opti('conic')
     self.opt.solver("osqp", p_opts, s_opts)
 
     self.U = self.opt.variable(3, self.N)
@@ -170,45 +192,28 @@ class Ismpc:
     z_ref = self.generateHeightRef(t)
     _, _, pz = self.generate_moving_constraint(t)
 
-    opt = cs.Opti('conic')
-    p_opts = {"expand": True}
-    s_opts = {"max_iter": 1000, "verbose": False}
-    opt.solver("osqp", p_opts, s_opts)
-
-    F_z = opt.variable(self.N)
-    
-    z0 = current['com']['pos'][2]
+    z0  = current['com']['pos'][2]
     dz0 = current['com']['vel'][2]
 
-    z = [z0]
-    dz = [dz0]
-    for k in range(self.N):
-      # Euler integration
-      dz.append(dz[-1] + self.delta * (F_z[k] / self.m - self.g))
-      z.append(z[-1] + self.delta * dz[-2]) 
+    self.opt_z.set_value(self.z0_param, z0)
+    self.opt_z.set_value(self.dz0_param, dz0)
+    self.opt_z.set_value(self.z_ref_param, z_ref)
 
-    Z = cs.vertcat(*z[1:]) 
-    dZ = cs.vertcat(*dz[1:])
-    DF_z = cs.diff(F_z)
+    sol_z   = self.opt_z.solve()
+    Fz_sol  = sol_z.value(self.Fz)
 
-    cost = cs.sumsqr(Z - z_ref) + self.alpha_z * cs.sumsqr(dZ) + self.beta_z * cs.sumsqr(DF_z)
-    opt.minimize(cost)    
-    opt.subject_to(F_z >= self.fz_min)
-    
-    sol = opt.solve()
-    F_z_sol = sol.value(F_z)
+    self.opt_z.set_initial(self.Fz, Fz_sol)  
 
-    z_sol = np.zeros(self.N + 1)
+    z_sol  = np.zeros(self.N + 1)
     dz_sol = np.zeros(self.N + 1)
     z_sol[0] = z0
     dz_sol[0] = dz0
     for k in range(self.N):
-      dz_sol[k + 1] = dz_sol[k] + self.delta * (F_z_sol[k] / self.m - self.g)
-      z_sol[k + 1] = z_sol[k] + self.delta * dz_sol[k]
+      dz_sol[k + 1] = dz_sol[k] + self.delta * (Fz_sol[k] / self.m - self.g)
+      z_sol[k + 1] = z_sol[k]  + self.delta * dz_sol[k]
 
-    ddz_sol = F_z_sol / self.m - self.g
-    denom = z_sol[:self.N] - pz
-    denom = np.maximum(denom, 1e-3) # prevent division by zero
+    ddz_sol = Fz_sol / self.m - self.g
+    denom = np.maximum(z_sol[:self.N] - pz, 1e-3)
     eta_seq = np.sqrt((self.g + ddz_sol) / denom)
 
     return eta_seq, z_sol, dz_sol
