@@ -19,6 +19,7 @@ class Ismpc:
     self.fz_min = self.params["fz_min"]
     self.alpha_z = self.params["alpha_z"]
     self.beta_z = self.params["beta_z"]
+    self.alpha_x = self.params["alpha_x"]
 
     # lip model matrices
     #self.A_lip = np.array([[0, 1, 0], [self.eta**2, 0, -self.eta**2], [0, 0, 0]])
@@ -34,27 +35,8 @@ class Ismpc:
     p_opts = {"expand": True}
     s_opts = {"max_iter": 1000, "verbose": False}
 
-    self.opt_z = cs.Opti('conic')
-    self.opt_z.solver("osqp", p_opts, s_opts)
-
-    self.Fz        = self.opt_z.variable(self.N)
-    self.z0_param  = self.opt_z.parameter()
-    self.dz0_param = self.opt_z.parameter()
-    self.z_ref_param = self.opt_z.parameter(self.N)
-
-    _z  = [self.z0_param]
-    _dz = [self.dz0_param]
-    for k in range(self.N):
-      _dz.append(_dz[-1] + self.delta * (self.Fz[k] / self.m - self.g))
-      _z.append(_z[-1]   + self.delta * _dz[-2])
-
-    _Z   = cs.vertcat(*_z[1:])
-    _dZ  = cs.vertcat(*_dz[1:])
-    _dFz = cs.diff(self.Fz)
-
-    cost_z = cs.sumsqr(_Z - self.z_ref_param) + self.alpha_z * cs.sumsqr(_dZ) + self.beta_z * cs.sumsqr(_dFz)
-    self.opt_z.minimize(cost_z)
-    self.opt_z.subject_to(self.Fz >= self.fz_min)
+    self._init_optZ(p_opts, s_opts)
+    self._init_optXY(p_opts, s_opts)
 
     self.opt = cs.Opti('conic')
     self.opt.solver("osqp", p_opts, s_opts)
@@ -118,6 +100,78 @@ class Ismpc:
     self.x = np.zeros(9)
     self.lip_state = {'com': {'pos': np.zeros(3), 'vel': np.zeros(3), 'acc': np.zeros(3)},
                       'zmp': {'pos': np.zeros(3), 'vel': np.zeros(3)}}
+
+  def _init_optZ(self, p_opts, s_opts):
+    self.opt_z = cs.Opti('conic')
+    self.opt_z.solver("osqp", p_opts, s_opts)
+
+    self.Fz = self.opt_z.variable(self.N)
+    self.z0_param = self.opt_z.parameter()
+    self.dz0_param = self.opt_z.parameter()
+    self.z_ref_param = self.opt_z.parameter(self.N)
+
+    _z = [self.z0_param]
+    _dz = [self.dz0_param]
+    for k in range(self.N):
+      _dz.append(_dz[-1] + self.delta * (self.Fz[k] / self.m - self.g))
+      _z.append(_z[-1] + self.delta * _dz[-2])
+
+    _Z   = cs.vertcat(*_z[1:])
+    _dZ  = cs.vertcat(*_dz[1:])
+    _dFz = cs.diff(self.Fz)
+
+    cost_z = cs.sumsqr(_Z - self.z_ref_param) + self.alpha_z * cs.sumsqr(_dZ) + self.beta_z * cs.sumsqr(_dFz)
+    self.opt_z.minimize(cost_z)
+    self.opt_z.subject_to(self.Fz >= self.fz_min)
+
+  def _init_optXY(self, p_opts, s_opts):
+    self.opt_xy = cs.Opti('conic')
+    self.opt_xy.solver("osqp", p_opts, s_opts)
+
+
+    self.X_xy = self.opt_xy.variable(6, self.N + 1)
+    self.U_xy = self.opt_xy.variable(2, self.N)  
+
+    self.x0_xy_param = self.opt_xy.parameter(6)      
+    self.lambda_xy_param = self.opt_xy.parameter(self.N) 
+    self.xmc_param = self.opt_xy.parameter(self.N) 
+    self.ymc_param = self.opt_xy.parameter(self.N) 
+
+    for i in range(self.N):
+      lam_i = self.lambda_xy_param[i]
+      # x axis
+      self.opt_xy.subject_to(self.X_xy[0, i+1] == self.X_xy[0, i] + self.delta * self.X_xy[1, i])
+      self.opt_xy.subject_to(self.X_xy[1, i+1] == self.X_xy[1, i] + self.delta * lam_i * (self.X_xy[0, i] - self.X_xy[2, i]))
+      self.opt_xy.subject_to(self.X_xy[2, i+1] == self.X_xy[2, i] + self.delta * self.U_xy[0, i])
+      # y axis
+      self.opt_xy.subject_to(self.X_xy[3, i+1] == self.X_xy[3, i] + self.delta * self.X_xy[4, i])
+      self.opt_xy.subject_to(self.X_xy[4, i+1] == self.X_xy[4, i] + self.delta * lam_i * (self.X_xy[3, i] - self.X_xy[5, i]))
+      self.opt_xy.subject_to(self.X_xy[5, i+1] == self.X_xy[5, i] + self.delta * self.U_xy[1, i])
+
+    # Cost function (Section 5.3.6):
+    # min ||Xz - Xmc||^2 + alpha_x * ||Delta Xz||^2
+    _dxz = cs.diff(self.X_xy[2, :])  
+    _dyz = cs.diff(self.X_xy[5, :])  
+    cost_xy = (
+      100 * cs.sumsqr(self.X_xy[2, 1:].T - self.xmc_param) +
+      100 * cs.sumsqr(self.X_xy[5, 1:].T - self.ymc_param) +
+      self.alpha_x * cs.sumsqr(_dxz) +
+      self.alpha_x * cs.sumsqr(_dyz)
+    )
+    self.opt_xy.minimize(cost_xy)
+
+    # ZMP constraints (Section 5.3.1):
+    self.opt_xy.subject_to(self.X_xy[2, 1:].T <= self.xmc_param + self.foot_size / 2.)
+    self.opt_xy.subject_to(self.X_xy[2, 1:].T >= self.xmc_param - self.foot_size / 2.)
+    self.opt_xy.subject_to(self.X_xy[5, 1:].T <= self.ymc_param + self.foot_size / 2.)
+    self.opt_xy.subject_to(self.X_xy[5, 1:].T >= self.ymc_param - self.foot_size / 2.)
+
+    self.opt_xy.subject_to(self.X_xy[:, 0] == self.x0_xy_param)
+
+    
+    # TODO: Stability constraint (5.3.5)
+
+
 
   def solve(self, current, t, eta_seq):
     self.x = np.array([current['com']['pos'][0], current['com']['vel'][0], current['zmp']['pos'][0],
@@ -220,9 +274,24 @@ class Ismpc:
 
     
 
-  def qp_x(self, current, t):
-    pass
+  def qp_xy(self, current, t, eta_seq):
+    lambda_seq = eta_seq**2
+    mc_x, mc_y, _ = self.generate_moving_constraint(t)
 
-  def qp_y(self, current, t):
+    x0_xy = np.array([
+      current['com']['pos'][0], current['com']['vel'][0], current['zmp']['pos'][0],
+      current['com']['pos'][1], current['com']['vel'][1], current['zmp']['pos'][1],
+    ])
+
+    self.opt_xy.set_value(self.x0_xy_param, x0_xy)
+    self.opt_xy.set_value(self.lambda_xy_param, lambda_seq)
+    self.opt_xy.set_value(self.xmc_param, mc_x)
+    self.opt_xy.set_value(self.ymc_param, mc_y)
+
+    sol_xy = self.opt_xy.solve()
+
+    self.opt_xy.set_initial(self.X_xy, sol_xy.value(self.X_xy))  
+    self.opt_xy.set_initial(self.U_xy, sol_xy.value(self.U_xy))
+
     pass
 

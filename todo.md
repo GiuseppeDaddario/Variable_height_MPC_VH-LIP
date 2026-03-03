@@ -13,3 +13,26 @@
 - [ ] Test running
     - [ ] On flat ground
     - [ ] On different surfaces
+
+### Steps QP-z
+[X] Decisional variables
+[X] Parameters
+[X] Dynamics
+[X] Cost function
+[X] Constraints
+    [X] No slipping
+    [X] 
+
+### Steps QP-xy
+[X] Decisional variables
+[X] Parameters
+[X] Dynamics
+[X] Cost function
+[ ] Constraints
+    [X] ZMP constraint
+    [ ] Ground patch constraint
+    [ ] Kinematic constraint
+    [ ] Swing foot constraint
+    [ ] Stability constraint
+[ ] QP-xy function
+[ ] Pipeline in solve()
