@@ -19,11 +19,13 @@ class Hrp4Controller(dart.gui.osg.RealTimeWorldNode):
         m = self.hrp4.getMass()
         mu = 0.5
         
+        
         a_max = 10
         alpha_z = 1e-5
         beta_z = 1e-5
         alpha_x = 1e-5
         alpha_y = 1e-5
+        beta_x  = 1e-3   # footstep deviation cost weight
 
         self.params = {
             'g': 9.81,
@@ -44,6 +46,7 @@ class Hrp4Controller(dart.gui.osg.RealTimeWorldNode):
             'beta_z': beta_z,
             'alpha_x': alpha_x,
             'alpha_y': alpha_y,
+            'beta_x':  beta_x,
         }
         self.params['eta'] = np.sqrt(self.params['g'] / self.params['h'])
 

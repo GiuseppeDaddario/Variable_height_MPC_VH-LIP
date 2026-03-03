@@ -20,6 +20,16 @@ class Ismpc:
     self.alpha_z = self.params["alpha_z"]
     self.beta_z = self.params["beta_z"]
     self.alpha_x = self.params["alpha_x"]
+    self.alpha_y = self.params["alpha_y"]
+    self.beta_x  = self.params["beta_x"]
+
+    # d_g: flat terrain assumption --> Paper "As large as possible" (P_conv)
+    self.d_g_x   = self.params.get("d_g_x", 3 * self.foot_size)
+    self.d_g_y   = self.params.get("d_g_y", 3 * self.foot_size)
+
+    # N_steps: how many footsteps fit in the MPC horizon
+    step_duration = self.params["ss_duration"] + self.params["ds_duration"]
+    self.N_steps  = self.params.get("N_steps", max(1, int(np.ceil(self.N / step_duration))))
 
     # lip model matrices
     #self.A_lip = np.array([[0, 1, 0], [self.eta**2, 0, -self.eta**2], [0, 0, 0]])
@@ -156,11 +166,9 @@ class Ismpc:
       100 * cs.sumsqr(self.X_xy[2, 1:].T - self.xmc_param) +
       100 * cs.sumsqr(self.X_xy[5, 1:].T - self.ymc_param) +
       self.alpha_x * cs.sumsqr(_dxz) +
-      self.alpha_x * cs.sumsqr(_dyz)
+      self.alpha_y * cs.sumsqr(_dyz)
     )
-    self.opt_xy.minimize(cost_xy)
-
-    # ZMP constraints (Section 5.3.1):
+    # ZMP constraints:
     self.opt_xy.subject_to(self.X_xy[2, 1:].T <= self.xmc_param + self.foot_size / 2.)
     self.opt_xy.subject_to(self.X_xy[2, 1:].T >= self.xmc_param - self.foot_size / 2.)
     self.opt_xy.subject_to(self.X_xy[5, 1:].T <= self.ymc_param + self.foot_size / 2.)
@@ -168,7 +176,27 @@ class Ismpc:
 
     self.opt_xy.subject_to(self.X_xy[:, 0] == self.x0_xy_param)
 
+    # Ground patch constraint 
+    S = self.N_steps  # number of footsteps in the horizon
+    self.X_f = self.opt_xy.variable(2, S)
+    self.xf_nominal_param = self.opt_xy.parameter(S)
+    self.yf_nominal_param = self.opt_xy.parameter(S)
+
+    margin_x = (self.d_g_x - self.foot_size) / 2.
+    margin_y = (self.d_g_y - self.foot_size) / 2.
+    for j in range(S):
+      self.opt_xy.subject_to(self.X_f[0, j] - self.xf_nominal_param[j] <=  margin_x)
+      self.opt_xy.subject_to(self.X_f[0, j] - self.xf_nominal_param[j] >= -margin_x)
+      self.opt_xy.subject_to(self.X_f[1, j] - self.yf_nominal_param[j] <=  margin_y)
+      self.opt_xy.subject_to(self.X_f[1, j] - self.yf_nominal_param[j] >= -margin_y)
+
+    # Kinematic constraint
     
+    # cost: penalise deviation of optimised footsteps from nominal (Section 5.3.6)
+    #cost_xy += self.beta_x * cs.sumsqr(self.X_f[0, :] - self.xf_nominal_param)
+    #cost_xy += self.beta_x * cs.sumsqr(self.X_f[1, :] - self.yf_nominal_param)
+    #self.opt_xy.minimize(cost_xy)
+
     # TODO: Stability constraint (5.3.5)
 
 
