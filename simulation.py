@@ -18,35 +18,28 @@ class Hrp4Controller(dart.gui.osg.RealTimeWorldNode):
         self.time = 0
         m = self.hrp4.getMass()
         mu = 0.5
-        
-        
-        a_max = 10
-        alpha_z = 1e-5
-        beta_z = 1e-5
-        alpha_x = 1e-5
-        alpha_y = 1e-5
-        beta_x  = 1e-3   # footstep deviation cost weight
 
         self.params = {
             'g': 9.81,
-            'h': 0.72, # (Non esplicitato nei param del paper, ma 0.7-0.72 è corretto per HRP-4)
-            'foot_size': 0.08, # Aggiornato al paper
+            'h': 0.72,
+            'foot_size': 0.08,
             'step_height': 0.02,
-            'ss_duration': 50, # Aggiornato al paper
-            'ds_duration': 20, # Aggiornato al paper
+            'ss_duration': 50, 
+            'ds_duration': 20, 
             'world_time_step': world.getTimeStep(), # 0.01s
             'first_swing': 'rfoot',
             'µ': mu,
-            'N': 70, # Aggiornato al paper (0.7s)
+            'N': 70,  # Control horizon (0.7s) --> C
+            'P': 180, # Preview horizon (1.8s)
             'dof': self.hrp4.getNumDofs(),
 
             'm': m,
-            'fz_min': 114.0, # Aggiornato al paper
+            'fz_min': 114.0, 
             'alpha_z': 1e-5,
             'beta_z': 1e-5,
-            'alpha_x': 1.0,  # Aggiornato al paper
-            'alpha_y': 1.0,  # Aggiornato al paper
-            'beta_x': 10000.0, # Aggiornato al paper
+            'alpha_x': 1.0,  
+            'alpha_y': 1.0,  
+            'beta_x': 10000.0, 
             'beta_y': 10000.0,
             
             # Aggiunti limiti cinematici dal paper
@@ -155,6 +148,11 @@ class Hrp4Controller(dart.gui.osg.RealTimeWorldNode):
 
         # update kalman filter
         u = np.array([self.desired['zmp']['vel'][0], self.desired['zmp']['vel'][1], self.desired['zmp']['vel'][2]])
+        # Update A matrix with current λ from VH-LIP (time-varying dynamics)
+        dt = self.params['world_time_step']
+        A_lip_tv = self.mpc.A_lip  # already updated in solve() with current λ
+        A_block = np.identity(3) + dt * A_lip_tv
+        self.kf.A = block_diag(A_block, A_block, A_block)
         self.kf.predict(u)
         x_flt, _ = self.kf.update(np.array([self.current['com']['pos'][0], self.current['com']['vel'][0], self.current['zmp']['pos'][0], \
                                             self.current['com']['pos'][1], self.current['com']['vel'][1], self.current['zmp']['pos'][1], \

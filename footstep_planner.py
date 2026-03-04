@@ -33,6 +33,7 @@ class FootstepPlanner:
                     unicycle_pos += R @ vref[j][:2] * params['world_time_step']
 
             # compute step position (lateral offset = ell/2 from params)
+            # BEFORE: displacement = 0.1 if support_foot == 'lfoot' else -0.1
             half_ell = params.get('ell', 0.2) / 2.0
             displacement = half_ell if support_foot == 'lfoot' else -half_ell
             displ_x = - np.sin(unicycle_theta) * displacement
@@ -76,3 +77,5 @@ class FootstepPlanner:
             return 'ss'
         else:
             return 'ds'
+
+        # TODO: Add flight phase
