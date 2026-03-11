@@ -78,13 +78,17 @@ class FootTrajectoryGenerator:
     swing_ang_vel =             (target_ang - start_ang) * (3 * A * t**2 + 2 * B * t   ) / self.delta
     swing_ang_acc =             (target_ang - start_ang) * (6 * A * t    + 2 * B       ) / self.delta**2
 
-    # quartic polynomial for vertical position
-    A =   16 * self.step_height / T**4
-    B = - 32 * self.step_height / T**3
-    C =   16 * self.step_height / T**2
-    swing_pos[2] =       A * t**4 +     B * t**3 +     C * t**2
-    swing_vel[2] = ( 4 * A * t**3 + 3 * B * t**2 + 2 * C * t   ) / self.delta
-    swing_acc[2] = (12 * A * t**2 + 6 * B * t    + 2 * C       ) / self.delta**2
+    # vertical position: cubic interpolation (start_z → target_z) + quartic bell for clearance
+    dz = target_pos[2] - start_pos[2]
+    effective_height = self.step_height + abs(dz)
+
+    A_q =   16 * effective_height / T**4
+    B_q = - 32 * effective_height / T**3
+    C_q =   16 * effective_height / T**2
+
+    swing_pos[2] = start_pos[2] + dz * (A * t**3 + B * t**2) + A_q * t**4 + B_q * t**3 + C_q * t**2
+    swing_vel[2] = (dz * (3 * A * t**2 + 2 * B * t) + 4 * A_q * t**3 + 3 * B_q * t**2 + 2 * C_q * t) / self.delta
+    swing_acc[2] = (dz * (6 * A * t + 2 * B) + 12 * A_q * t**2 + 6 * B_q * t + 2 * C_q) / self.delta**2
 
     # support foot remains stationary
     support_pos = self.plan[step_index]['pos']

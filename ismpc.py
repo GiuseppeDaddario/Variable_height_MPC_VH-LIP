@@ -13,6 +13,7 @@ class Ismpc:
     self.initial = initial
     self.footstep_planner = footstep_planner
     self.sigma = lambda t, t0, t1: np.clip((t - t0) / (t1 - t0), 0, 1) # piecewise linear sigmoidal function
+    self.mass = params['mass']
 
     # lip model matrices
     self.A_lip = np.array([[0, 1, 0], [self.eta**2, 0, -self.eta**2], [0, 0, 0]])
@@ -24,81 +25,334 @@ class Ismpc:
       self.A_lip @ x[3:6] + self.B_lip @ u[1],
       self.A_lip @ x[6:9] + self.B_lip @ u[2] + np.array([0, - params['g'], 0]),
     )
-
-    # optimization problem
-    self.opt = cs.Opti('conic')
-    p_opts = {"expand": True}
-    s_opts = {"max_iter": 1000, "verbose": False}
-    self.opt.solver("osqp", p_opts, s_opts)
-
-    self.U = self.opt.variable(3, self.N)
-    self.X = self.opt.variable(9, self.N + 1)
-
-    self.x0_param = self.opt.parameter(9)
-    self.zmp_x_mid_param = self.opt.parameter(self.N)
-    self.zmp_y_mid_param = self.opt.parameter(self.N)
-    self.zmp_z_mid_param = self.opt.parameter(self.N)
-
-    for i in range(self.N):
-      self.opt.subject_to(self.X[:, i + 1] == self.X[:, i] + self.delta * self.f(self.X[:, i], self.U[:, i]))
-
-    cost = cs.sumsqr(self.U) + \
-           100 * cs.sumsqr(self.X[2, 1:].T - self.zmp_x_mid_param) + \
-           100 * cs.sumsqr(self.X[5, 1:].T - self.zmp_y_mid_param) + \
-           100 * cs.sumsqr(self.X[8, 1:].T - self.zmp_z_mid_param)
-
-    self.opt.minimize(cost)
-
-    # zmp constraints
-    self.opt.subject_to(self.X[2, 1:].T <= self.zmp_x_mid_param + self.foot_size / 2.)
-    self.opt.subject_to(self.X[2, 1:].T >= self.zmp_x_mid_param - self.foot_size / 2.)
-    self.opt.subject_to(self.X[5, 1:].T <= self.zmp_y_mid_param + self.foot_size / 2.)
-    self.opt.subject_to(self.X[5, 1:].T >= self.zmp_y_mid_param - self.foot_size / 2.)
-    self.opt.subject_to(self.X[8, 1:].T <= self.zmp_z_mid_param + self.foot_size / 2.)
-    self.opt.subject_to(self.X[8, 1:].T >= self.zmp_z_mid_param - self.foot_size / 2.)
-
-    # initial state constraint
-    self.opt.subject_to(self.X[:, 0] == self.x0_param)
-
-    # stability constraint with periodic tail
-    self.opt.subject_to(self.X[1, 0     ] + self.eta * (self.X[0, 0     ] - self.X[2, 0     ]) == \
-                        self.X[1, self.N] + self.eta * (self.X[0, self.N] - self.X[2, self.N]))
-    self.opt.subject_to(self.X[4, 0     ] + self.eta * (self.X[3, 0     ] - self.X[5, 0     ]) == \
-                        self.X[4, self.N] + self.eta * (self.X[3, self.N] - self.X[5, self.N]))
-    self.opt.subject_to(self.X[7, 0     ] + self.eta * (self.X[6, 0     ] - self.X[8, 0     ]) == \
-                        self.X[7, self.N] + self.eta * (self.X[6, self.N] - self.X[8, self.N]))
-
+    
+    # solver
+    self._setup_qp_z()
+    self._setup_qp_xy()
+    
     # state
     self.x = np.zeros(9)
     self.lip_state = {'com': {'pos': np.zeros(3), 'vel': np.zeros(3), 'acc': np.zeros(3)},
                       'zmp': {'pos': np.zeros(3), 'vel': np.zeros(3)}}
 
+  def _setup_qp_z(self):
+    self.opt_z = cs.Opti('conic')
+    p_opts = {"expand": True}
+    s_opts = {"max_iter": 10000, "verbose": False, "adaptive_rho": True}
+    self.opt_z.solver("osqp", p_opts, s_opts)
+    
+    # Decision variable
+    self.f_z = self.opt_z.variable(self.N)
+    # Predicted state (Z and Z_dot)
+    self.z_c = self.opt_z.variable(2, self.N + 1)
+    
+    # Parameters
+    self.z0 = self.opt_z.parameter(2)
+    self.z_star = self.opt_z.parameter(self.N)
+    
+    # ensure start position = current robot position
+    self.opt_z.subject_to(self.z_c[:,0] == self.z0)
+    
+    # Dynamic constraint
+    for i in range (self.N):
+      z_step = self.z_c[0,i] + self.delta * self.z_c[1,i]
+      z_dot_step = self.z_c[1, i] + self.delta * ((self.f_z[i] / self.mass) - self.params['g'])
+      # 2. ensure velocity and accel are feasible for all the steps
+      self.opt_z.subject_to(self.z_c[0,i+1] == z_step)
+      self.opt_z.subject_to(self.z_c[1,i+1] == z_dot_step)
+    
+    # 3. friction limit (sufficient to avoid slip)
+    self.opt_z.subject_to(self.f_z >= self.params['fs_min'])
+    
+    # Cost
+    cost_z = cs.sumsqr(self.z_c[0, 1:].T - self.z_star) + \
+             self.params['alpha_z'] * cs.sumsqr(self.z_c[1, 1:]) + \
+             self.params['beta_z'] * cs.sumsqr(cs.diff(self.f_z))
+    
+    #NOTE - add fs_min, alpha_z, beta_z to params dict
+    
+    self.opt_z.minimize(cost_z)
+  
+  def _setup_qp_xy(self):
+    self.opt_xy = cs.Opti('conic')
+    p_opts = {"expand": True}
+    s_opts = {"max_iter": 10000, "verbose": False, "adaptive_rho": True, "polish": True}
+    self.opt_xy.solver("osqp", p_opts, s_opts)
+    
+    self.f_max = self.params['f_max']
+    
+    # Decision variables (x and y)
+    self.x_z = self.opt_xy.variable(self.N)
+    self.x_f = self.opt_xy.variable(self.f_max) #NOTE -  add f_max to params
+    self.x_c = self.opt_xy.variable(2, self.N + 1) # CoM state trajectories, used to do casadi multiple shooting (optimization)
+    
+    self.y_z = self.opt_xy.variable(self.N)
+    self.y_f = self.opt_xy.variable(self.f_max) #NOTE -  add f_max to params
+    self.y_c = self.opt_xy.variable(2, self.N + 1) # CoM state trajectories, used to do casadi multiple shooting (optimization)
+    
+    # Parameters
+    self.xy0 = self.opt_xy.parameter(4)
+    self.lambda_t = self.opt_xy.parameter(self.N) # Time varing frequency of the lip
+    
+    self.phi_tc = self.opt_xy.parameter(2, 2)
+    self.b_int = self.opt_xy.parameter(2, self.N)
+    self.tail_dcm_x = self.opt_xy.parameter()
+    self.tail_dcm_y = self.opt_xy.parameter()
+    
+    # candidate footsteps
+    self.x_cf = self.opt_xy.parameter(self.f_max)
+    self.y_cf = self.opt_xy.parameter(self.f_max)
+    
+    # alpha for moving contraint of zmp
+    self.alpha_j = self.opt_xy.parameter(self.N, self.f_max)
+    
+    self.x_mc = cs.mtimes(self.alpha_j, self.x_f)
+    self.y_mc = cs.mtimes(self.alpha_j, self.y_f)
+    
+    # ensure start position = current robot position
+    self.opt_xy.subject_to(self.x_c[:, 0] == self.xy0[0:2])
+    self.opt_xy.subject_to(self.y_c[:, 0] == self.xy0[2:4])
+    
+    # Dynamic constraint
+    for i in range(self.N):
+      x_step = self.x_c[0,i] + self.delta * self.x_c[1, i]
+      x_dot_step = self.x_c[1,i] + self.delta * (self.lambda_t[i] * (self.x_c[0, i] - self.x_z[i]))
+      self.opt_xy.subject_to(self.x_c[0,i+1] == x_step)
+      self.opt_xy.subject_to(self.x_c[1,i+1] == x_dot_step)
+      
+      y_step = self.y_c[0,i] + self.delta * self.y_c[1, i]
+      y_dot_step = self.y_c[1,i] + self.delta * (self.lambda_t[i] * (self.y_c[0, i] - self.y_z[i]))
+      self.opt_xy.subject_to(self.y_c[0,i+1] == y_step)
+      self.opt_xy.subject_to(self.y_c[1,i+1] == y_dot_step)
+    
+    # ZMP constraint
+    self.opt_xy.subject_to(self.x_z <= self.x_mc + self.foot_size / 2)
+    self.opt_xy.subject_to(self.x_z >= self.x_mc - self.foot_size / 2)
+    self.opt_xy.subject_to(self.y_z <= self.y_mc + self.foot_size / 2)
+    self.opt_xy.subject_to(self.y_z >= self.y_mc - self.foot_size / 2)
+    
+    # Ground patch constraint
+    self.patch_x_min = self.opt_xy.parameter(self.f_max)
+    self.patch_x_max = self.opt_xy.parameter(self.f_max)
+    self.patch_y_min = self.opt_xy.parameter(self.f_max)
+    self.patch_y_max = self.opt_xy.parameter(self.f_max)
+    
+    self.opt_xy.subject_to(self.x_f >= self.patch_x_min)
+    self.opt_xy.subject_to(self.x_f <= self.patch_x_max)
+    self.opt_xy.subject_to(self.y_f >= self.patch_y_min)
+    self.opt_xy.subject_to(self.y_f <= self.patch_y_max)
+    
+    # Kinematic constraint
+    self.d_ax = self.opt_xy.parameter(self.f_max)
+    self.d_ay = self.opt_xy.parameter(self.f_max)
+    
+    self.l = self.params["l"] #NOTE - add l to params
+    self.l_sign = self.opt_xy.parameter(self.f_max)
+    
+    self.curr_sup_x = self.opt_xy.parameter()
+    self.curr_sup_y = self.opt_xy.parameter()
+    
+    for i in range(self.f_max):
+      prev_x = self.curr_sup_x if i == 0 else self.x_f[i-1]
+      prev_y = self.curr_sup_y if i == 0 else self.y_f[i-1]
+      
+      dx = self.x_f[i] - prev_x
+      dy = self.y_f[i] - prev_y
+      
+      # X axis
+      self.opt_xy.subject_to(dx <= self.d_ax[i] / 2)
+      self.opt_xy.subject_to(dx >= -self.d_ax[i] / 2)
+      
+      # Y axis
+      self.opt_xy.subject_to(dy - (self.l * self.l_sign[i]) <= self.d_ay[i] / 2)
+      self.opt_xy.subject_to(dy - (self.l * self.l_sign[i]) >= -self.d_ay[i] / 2)
+    
+    # Proposition 2
+    self.eta_lip_param = self.opt_xy.parameter()
+    g_val = cs.horzcat(1, 1 / self.eta_lip_param)
+
+    zmp_integral_x = 0
+    for i in range(self.N):
+        zmp_integral_x += self.b_int[:, i] * self.x_z[i]
+    self.opt_xy.subject_to(g_val @ (self.phi_tc @ self.xy0[0:2] + zmp_integral_x) == self.tail_dcm_x)
+
+    zmp_integral_y = 0
+    for i in range(self.N):
+        zmp_integral_y += self.b_int[:, i] * self.y_z[i]
+    self.opt_xy.subject_to(g_val @ (self.phi_tc @ self.xy0[2:4] + zmp_integral_y) == self.tail_dcm_y)
+      
+    # cost function
+    alpha_xy = self.params['alpha_xy']
+    beta_xy = self.params['beta_xy']
+    
+    cost_x = cs.sumsqr(self.x_z - self.x_mc) + \
+             alpha_xy * cs.sumsqr(cs.diff(self.x_z)) + \
+             beta_xy * cs.sumsqr(self.x_f - self.x_cf)
+    
+    cost_y = cs.sumsqr(self.y_z - self.y_mc) + \
+             alpha_xy * cs.sumsqr(cs.diff(self.y_z)) + \
+             beta_xy * cs.sumsqr(self.y_f - self.y_cf)
+    
+    self.opt_xy.minimize(cost_x + cost_y)
+
   def solve(self, current, t):
-    self.x = np.array([current['com']['pos'][0], current['com']['vel'][0], current['zmp']['pos'][0],
-                       current['com']['pos'][1], current['com']['vel'][1], current['zmp']['pos'][1],
-                       current['com']['pos'][2], current['com']['vel'][2], current['zmp']['pos'][2]])
+    self.xy_init = np.array([current['com']['pos'][0], current['com']['vel'][0],
+                       current['com']['pos'][1], current['com']['vel'][1]])
+    
+    self.z_init = np.array([current['com']['pos'][2], current['com']['vel'][2]])
     
     mc_x, mc_y, mc_z = self.generate_moving_constraint(t)
+    
+    idx = self.footstep_planner.get_step_index_at_time(t)
+    if idx is None: idx = len(self.footstep_planner.plan) - 1
+    current_h_ref = self.footstep_planner.plan[idx]['h_ref']
+    
+    z_ref = mc_z + current_h_ref
 
-    # solve optimization problem
-    self.opt.set_value(self.x0_param, self.x)
-    self.opt.set_value(self.zmp_x_mid_param, mc_x)
-    self.opt.set_value(self.zmp_y_mid_param, mc_y)
-    self.opt.set_value(self.zmp_z_mid_param, mc_z)
+    # warm start
+    if not hasattr(self, 'qp_z_warm_started'):
+        self.opt_z.set_initial(self.f_z, self.mass * self.params['g'])
+        self.opt_z.set_initial(self.z_c[0, :], self.z_init[0])
+        self.opt_z.set_initial(self.z_c[1, :], 0.0)
+        self.qp_z_warm_started = True
 
-    sol = self.opt.solve()
-    self.x = sol.value(self.X[:,1])
-    self.u = sol.value(self.U[:,0])
+    # Solve qp-z
+    self.opt_z.set_value(self.z0, self.z_init)
+    self.opt_z.set_value(self.z_star, z_ref)
+    
+    sol_z = self.opt_z.solve()
+    z_c = sol_z.value(self.z_c)
+    f_z = sol_z.value(self.f_z)
+    
+    self.opt_z.set_initial(self.z_c, z_c)
+    self.opt_z.set_initial(self.f_z, f_z)
+    
+    # lambda calc
+    denom = z_c[0, :-1] - mc_z
+    denom = np.where(np.abs(denom) < 1e-6, 1e-6, denom)
+    lambda_val = (f_z / self.mass) / denom
+    lambda_val = np.clip(lambda_val, 1e-4, None)
+    
+    x_cf, y_cf, p_min_x, p_max_x, p_min_y, p_max_y, d_ax, d_ay, signs = self.generate_step_params(t)
+    idx = self.footstep_planner.get_step_index_at_time(t)
+    swing_foot = self.footstep_planner.plan[idx]['foot_id']
+    sup_foot = 'lfoot' if swing_foot == 'rfoot' else 'rfoot'
+    curr_sup_x = current[sup_foot]['pos'][3]
+    curr_sup_y = current[sup_foot]['pos'][4]
+    
+    # warm start
+    if not hasattr(self, 'qp_xy_warm_started'):
+        self.opt_xy.set_initial(self.x_c[0, :], self.xy_init[0])
+        self.opt_xy.set_initial(self.x_c[1, :], self.xy_init[1])
+        self.opt_xy.set_initial(self.y_c[0, :], self.xy_init[2])
+        self.opt_xy.set_initial(self.y_c[1, :], self.xy_init[3])
+        self.opt_xy.set_initial(self.x_z, self.xy_init[0]) 
+        self.opt_xy.set_initial(self.y_z, self.xy_init[2])
+        self.opt_xy.set_initial(self.x_f, x_cf)
+        self.opt_xy.set_initial(self.y_f, y_cf)
+        self.qp_xy_warm_started = True
+    
+    # Solve qp-xy
+    self.opt_xy.set_value(self.xy0, self.xy_init)
+    self.opt_xy.set_value(self.lambda_t, lambda_val)
+    self.opt_xy.set_value(self.x_cf, x_cf)
+    self.opt_xy.set_value(self.y_cf, y_cf)
+    self.opt_xy.set_value(self.patch_x_min, p_min_x)
+    self.opt_xy.set_value(self.patch_x_max, p_max_x)
+    self.opt_xy.set_value(self.patch_y_min, p_min_y)
+    self.opt_xy.set_value(self.patch_y_max, p_max_y)
+    self.opt_xy.set_value(self.d_ax, d_ax)
+    self.opt_xy.set_value(self.d_ay, d_ay)
+    self.opt_xy.set_value(self.l_sign, signs)
+    self.opt_xy.set_value(self.curr_sup_x, curr_sup_x)
+    self.opt_xy.set_value(self.curr_sup_y, curr_sup_y)
 
-    self.opt.set_initial(self.U, sol.value(self.U))
-    self.opt.set_initial(self.X, sol.value(self.X))
+    # Alpha_j: maps optimized footstep positions to per-timestep ZMP references
+    alpha_val = self.compute_alpha_j(t)
+    self.opt_xy.set_value(self.alpha_j, alpha_val)
+
+    # Proposition 2 calc
+    phis = []
+    b_matrices = []
+    for val in lambda_val:
+        w = np.sqrt(val)
+        phi = np.array([[np.cosh(w*self.delta), np.sinh(w*self.delta)/w],
+                        [w*np.sinh(w*self.delta), np.cosh(w*self.delta)]])
+        b_mtx = np.array([[1 - np.cosh(w*self.delta)], 
+                      [-w * np.sinh(w*self.delta)]])
+        phis.append(phi)
+        b_matrices.append(b_mtx)
+
+    phi_total = np.eye(2)
+    for phi in phis:
+        phi_total = phi @ phi_total
+
+    b_integrated = np.zeros((2, self.N))
+    for i in range(self.N):
+        term_phi = np.eye(2)
+        for j in range(i + 1, self.N):
+            term_phi = phis[j] @ term_phi
+        b_integrated[:, i] = (term_phi @ b_matrices[i]).flatten()
+
+    target_h_ref = self.footstep_planner.plan[min(idx + self.N, len(self.footstep_planner.plan) - 1)]['h_ref']
+    eta_lip = np.sqrt(self.params['g'] / (mc_z[-1] + target_h_ref))
+    
+    tail_dcm_x_val, tail_dcm_y_val = self._compute_tail_integral(t, eta_lip)
+
+    # Set values to opt_xy
+    self.opt_xy.set_value(self.phi_tc, phi_total)
+    self.opt_xy.set_value(self.b_int, b_integrated)
+    self.opt_xy.set_value(self.eta_lip_param, eta_lip)
+    self.opt_xy.set_value(self.tail_dcm_x, tail_dcm_x_val)
+    self.opt_xy.set_value(self.tail_dcm_y, tail_dcm_y_val)
+
+    #NOTE - test to check if the error is due to last iteration
+    try:
+      sol_xy = self.opt_xy.solve()
+    except RuntimeError as e:
+      current_step_idx = self.footstep_planner.get_step_index_at_time(t)
+      total_steps = len(self.footstep_planner.plan)
+      if current_step_idx is None or current_step_idx >= total_steps - 2:
+          print("\n" + "="*60)
+          print(f"[INFO] SUCCESSFUL RUN: Simulation ended at t={t:.2f}s.")
+          print("The QP solver stopped because the MPC preview horizon")
+          print("reached the end of the planned footstep array.")
+          print("="*60 + "\n")
+          import sys
+          sys.exit(0)
+          
+      else:
+          print("\n" + "="*60)
+          print(f"[FATAL ERROR] QP Solver failed mid-walk at t={t:.2f}s!")
+          print(f"Current footstep index: {current_step_idx} out of {total_steps}.")
+          print("This is a mathematical infeasibility (conflicting constraints).")
+          print("="*60 + "\n")
+          raise e
+        
+    x_c_opt = sol_xy.value(self.x_c)
+    y_c_opt = sol_xy.value(self.y_c)
+    x_z_opt = sol_xy.value(self.x_z)
+    y_z_opt = sol_xy.value(self.y_z)
+
+    x_f_opt = sol_xy.value(self.x_f)
+    y_f_opt = sol_xy.value(self.y_f)
+    self.opt_xy.set_initial(self.x_c, x_c_opt)
+    self.opt_xy.set_initial(self.y_c, y_c_opt)
+    self.opt_xy.set_initial(self.x_z, x_z_opt)
+    self.opt_xy.set_initial(self.y_z, y_z_opt)
+    self.opt_xy.set_initial(self.x_f, x_f_opt)
+    self.opt_xy.set_initial(self.y_f, y_f_opt)
 
     # create output LIP state
-    self.lip_state['com']['pos'] = np.array([self.x[0], self.x[3], self.x[6]])
-    self.lip_state['com']['vel'] = np.array([self.x[1], self.x[4], self.x[7]])
-    self.lip_state['zmp']['pos'] = np.array([self.x[2], self.x[5], self.x[8]])
-    self.lip_state['zmp']['vel'] = self.u
-    self.lip_state['com']['acc'] = self.eta**2 * (self.lip_state['com']['pos'] - self.lip_state['zmp']['pos']) + np.hstack([0, 0, - self.params['g']])
+    self.lip_state['com']['pos'] = np.array([x_c_opt[0, 1], y_c_opt[0, 1], z_c[0, 1]])
+    self.lip_state['com']['vel'] = np.array([x_c_opt[1, 1], y_c_opt[1, 1], z_c[1, 1]])
+    self.lip_state['zmp']['pos'] = np.array([x_z_opt[0], y_z_opt[0], mc_z[0]])
+    self.lip_state['zmp']['vel'] = (self.lip_state['zmp']['pos'] - current['zmp']['pos']) / self.delta
+    self.lip_state['com']['acc'] = np.array([
+        lambda_val[0] * (self.lip_state['com']['pos'][0] - self.lip_state['zmp']['pos'][0]),
+        lambda_val[0] * (self.lip_state['com']['pos'][1] - self.lip_state['zmp']['pos'][1]),
+        (f_z[0] / self.mass) - self.params['g']
+    ])
 
     contact = self.footstep_planner.get_phase_at_time(t)
     if contact == 'ss':
@@ -109,14 +363,128 @@ class Ismpc:
   def generate_moving_constraint(self, t):
     mc_x = np.full(self.N, (self.initial['lfoot']['pos'][3] + self.initial['rfoot']['pos'][3]) / 2.)
     mc_y = np.full(self.N, (self.initial['lfoot']['pos'][4] + self.initial['rfoot']['pos'][4]) / 2.)
+    mc_z = np.full(self.N, (self.initial['lfoot']['pos'][5] + self.initial['rfoot']['pos'][5]) / 2.)
     time_array = np.array(range(t, t + self.N))
     for j in range(len(self.footstep_planner.plan) - 1):
       fs_start_time = self.footstep_planner.get_start_time(j)
       ds_start_time = fs_start_time + self.footstep_planner.plan[j]['ss_duration']
       fs_end_time = ds_start_time + self.footstep_planner.plan[j]['ds_duration']
-      fs_current_pos = self.footstep_planner.plan[j]['pos'] if j > 0 else np.array([mc_x[0], mc_y[0]])
+      fs_current_pos = self.footstep_planner.plan[j]['pos'] if j > 0 else np.array([mc_x[0], mc_y[0], mc_z[0]])
       fs_target_pos = self.footstep_planner.plan[j + 1]['pos']
       mc_x += self.sigma(time_array, ds_start_time, fs_end_time) * (fs_target_pos[0] - fs_current_pos[0])
       mc_y += self.sigma(time_array, ds_start_time, fs_end_time) * (fs_target_pos[1] - fs_current_pos[1])
+      mc_z += self.sigma(time_array, ds_start_time, fs_end_time) * (fs_target_pos[2] - fs_current_pos[2])
 
-    return mc_x, mc_y, np.zeros(self.N)
+    return mc_x, mc_y, mc_z
+  
+  def generate_step_params(self, t):
+    idx = self.footstep_planner.get_step_index_at_time(t)
+    phase = self.footstep_planner.get_phase_at_time(t)
+    
+    # init arrays
+    x_cf = np.zeros(self.f_max)
+    y_cf = np.zeros(self.f_max)
+    p_min_x, p_max_x = np.zeros(self.f_max), np.zeros(self.f_max)
+    p_min_y, p_max_y = np.zeros(self.f_max), np.zeros(self.f_max)
+    d_ax, d_ay = np.zeros(self.f_max), np.zeros(self.f_max)
+    signs = np.zeros(self.f_max)
+    
+    # Admissible region on planar ground
+    d_ax0 = self.params['d_ax']
+    d_ay0 = self.params['d_ay']
+    sigma = self.params['sigma']
+    dz_max = self.params['dz_max']
+    
+    for i in range(self.f_max):
+      step_idx = min(idx + i, len(self.footstep_planner.plan) - 1)
+      prev_idx = max(0, step_idx - 1)
+      
+      step = self.footstep_planner.plan[step_idx]
+      prev_step = self.footstep_planner.plan[prev_idx]
+      
+      x_cf[i] = step['pos'][0]
+      y_cf[i] = step['pos'][1]
+      signs[i] = 1.0 if step['foot_id'] == 'lfoot' else -1.0
+      
+      if phase == 'ds':
+          p_min_x[i] = -1e5
+          p_max_x[i] =  1e5
+          p_min_y[i] = -1e5
+          p_max_y[i] =  1e5
+          d_ax[i] = 1e5
+          d_ay[i] = 1e5
+      else:
+          # Minkowski patch
+          p_min_x[i] = x_cf[i] - 0.1
+          p_max_x[i] = x_cf[i] + 0.1
+          p_min_y[i] = y_cf[i] - 0.1
+          p_max_y[i] = y_cf[i] + 0.1
+          #NOTE - simplification for testing
+          
+          dz = abs(step['pos'][2] - prev_step['pos'][2])
+          scaling = (1 - sigma * (dz / dz_max))
+          d_ax[i] = scaling * d_ax0
+          d_ay[i] = scaling * d_ay0
+    
+    return x_cf, y_cf, p_min_x, p_max_x, p_min_y, p_max_y, d_ax, d_ay, signs
+  
+  def compute_alpha_j(self, t):
+    idx = self.footstep_planner.get_step_index_at_time(t)
+    alpha = np.zeros((self.N, self.f_max))
+    for k in range(self.N):
+      abs_time = t + k
+      step_idx = self.footstep_planner.get_step_index_at_time(abs_time)
+      if step_idx is None:
+        step_idx = len(self.footstep_planner.plan) - 1
+      local = step_idx - idx
+      local = max(0, min(local, self.f_max - 1))
+      phase = self.footstep_planner.get_phase_at_time(abs_time)
+      if phase == 'ds':
+        fs_start = self.footstep_planner.get_start_time(step_idx)
+        ds_start = fs_start + self.footstep_planner.plan[step_idx]['ss_duration']
+        fs_end = ds_start + self.footstep_planner.plan[step_idx]['ds_duration']
+        if fs_end > ds_start:
+          sigma_val = np.clip((abs_time - ds_start) / (fs_end - ds_start), 0, 1)
+        else:
+          sigma_val = 1.0
+        next_local = min(local + 1, self.f_max - 1)
+        if local == next_local:
+          alpha[k, local] = 1.0
+        else:
+          alpha[k, local] = 1.0 - sigma_val
+          alpha[k, next_local] = sigma_val
+      else:
+        alpha[k, local] = 1.0
+    return alpha
+
+  def _compute_tail_integral(self, t, eta_lip):
+    P = self.params.get('P', 200) 
+    tail_mc_x, tail_mc_y, _ = self.generate_tail_moving_constraint(t)
+    n_tail = len(tail_mc_x)
+    time_steps = np.arange(1, n_tail + 1) * self.delta
+    weights = eta_lip * np.exp(-eta_lip * time_steps) * self.delta
+    x_tail = np.sum(weights * tail_mc_x)
+    y_tail = np.sum(weights * tail_mc_y)
+    terminal_weight = np.exp(-eta_lip * n_tail * self.delta)
+    x_tail += terminal_weight * tail_mc_x[-1]
+    y_tail += terminal_weight * tail_mc_y[-1]
+    return x_tail, y_tail
+  
+  def generate_tail_moving_constraint(self, t):
+    t_tail_start = t + self.N
+    P = self.params.get('P', 200)
+    mid_x = (self.initial['lfoot']['pos'][3] + self.initial['rfoot']['pos'][3]) / 2.
+    mid_y = (self.initial['lfoot']['pos'][4] + self.initial['rfoot']['pos'][4]) / 2.
+    tail_mc_x = np.full(P - self.N, mid_x)
+    tail_mc_y = np.full(P - self.N, mid_y)
+    time_array = np.arange(t_tail_start, t + P)
+    for j in range(len(self.footstep_planner.plan) - 1):
+        fs_start_time = self.footstep_planner.get_start_time(j)
+        ds_start_time = fs_start_time + self.footstep_planner.plan[j]['ss_duration']
+        fs_end_time = ds_start_time + self.footstep_planner.plan[j]['ds_duration']
+        fs_curr = self.footstep_planner.plan[j]['pos'] if j > 0 else np.array([mid_x, mid_y, 0.])
+        fs_targ = self.footstep_planner.plan[j+1]['pos']
+        sigma_val = self.sigma(time_array, ds_start_time, fs_end_time)
+        tail_mc_x += sigma_val * (fs_targ[0] - fs_curr[0])
+        tail_mc_y += sigma_val * (fs_targ[1] - fs_curr[1])
+    return tail_mc_x, tail_mc_y, None

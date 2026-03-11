@@ -18,16 +18,29 @@ class Hrp4Controller(dart.gui.osg.RealTimeWorldNode):
         self.time = 0
         self.params = {
             'g': 9.81,
+            'mass': 43.0,
             'h': 0.72,
-            'foot_size': 0.1,
-            'step_height': 0.02,
+            'foot_size': 0.08,
+            'step_height': 0.15,
             'ss_duration': 70,
             'ds_duration': 30,
+            'f_max': 3,
+            'l': 0.25,
             'world_time_step': world.getTimeStep(),
             'first_swing': 'rfoot',
             'µ': 0.5,
             'N': 100,
+            'P': 200,
             'dof': self.hrp4.getNumDofs(),
+            'alpha_z': 10,
+            'beta_z': 10,
+            'fs_min': 114.0,
+            'alpha_xy': 1,
+            'beta_xy': 10,
+            'sigma': 0.5,
+            'dz_max': 0.20,
+            'd_ax': 1.00,
+            'd_ay': 0.40,
         }
         self.params['eta'] = np.sqrt(self.params['g'] / self.params['h'])
 
@@ -77,7 +90,11 @@ class Hrp4Controller(dart.gui.osg.RealTimeWorldNode):
         self.id = id.InverseDynamics(self.hrp4, redundant_dofs)
 
         # initialize footstep planner
-        reference = [(0.1, 0., 0.2)] * 5 + [(0.1, 0., -0.1)] * 10 + [(0.1, 0., 0.)] * 10
+        # walk straight, step up onto a 10cm stair, continue walking on top
+        reference = [(0.1, 0., 0.)] * 10 + \
+                    [(0.2, 0., 0., 0.1, 0.72)] + \
+                    [(0.1, 0., 0., 0.0, 0.72)] * 10 + \
+                    [(0.1, 0., 0.)] * 4
         self.footstep_planner = footstep_planner.FootstepPlanner(
             reference,
             self.initial['lfoot']['pos'],
@@ -256,8 +273,10 @@ if __name__ == "__main__":
     current_dir = os.path.dirname(os.path.abspath(__file__))
     hrp4   = urdfParser.parseSkeleton(os.path.join(current_dir, "urdf", "hrp4.urdf"))
     ground = urdfParser.parseSkeleton(os.path.join(current_dir, "urdf", "ground.urdf"))
+    stair  = urdfParser.parseSkeleton(os.path.join(current_dir, "urdf", "stair.urdf"))
     world.addSkeleton(hrp4)
     world.addSkeleton(ground)
+    world.addSkeleton(stair)
     world.setGravity([0, 0, -9.81])
     world.setTimeStep(0.01)
 

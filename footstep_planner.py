@@ -10,8 +10,17 @@ class FootstepPlanner:
         unicycle_theta = (initial_lfoot[2]   + initial_rfoot[2]  ) / 2.
         support_foot   = params['first_swing']
         self.plan = []
+        
+        current_z = 0.0
 
         for j in range(len(vref)):
+            if len(vref[j]) == 3:
+                dx, dy, dtheta = vref[j]
+                dz = 0.0
+                h_ref = params.get('h', 0.72)
+            else:
+                dx, dy, dtheta, dz, h_ref = vref[j]
+            
             # set step duration
             ss_duration = default_ss_duration
             ds_duration = default_ds_duration
@@ -32,6 +41,8 @@ class FootstepPlanner:
                                   [np.sin(unicycle_theta),   np.cos(unicycle_theta)]])
                     unicycle_pos += R @ vref[j][:2] * params['world_time_step']
 
+            current_z += dz
+
             # compute step position
             displacement = 0.1 if support_foot == 'lfoot' else - 0.1
             displ_x = - np.sin(unicycle_theta) * displacement
@@ -39,7 +50,7 @@ class FootstepPlanner:
             pos = np.array((
                 unicycle_pos[0] + displ_x, 
                 unicycle_pos[1] + displ_y,
-                0.))
+                current_z))
             ang = np.array((0., 0., unicycle_theta))
 
             # add step to plan
@@ -48,7 +59,8 @@ class FootstepPlanner:
                 'ang'        : ang,
                 'ss_duration': ss_duration,
                 'ds_duration': ds_duration,
-                'foot_id'    : support_foot
+                'foot_id'    : support_foot,
+                'h_ref'      : h_ref,
                 })
             
             # switch support foot
