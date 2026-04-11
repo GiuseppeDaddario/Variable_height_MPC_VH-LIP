@@ -1,8 +1,10 @@
+import os
+os.environ["OSG_THREADING"] = "SingleThreaded"
+
 import numpy as np
 import dartpy as dart
 import copy
 from utils import *
-import os
 import ismpc
 import footstep_planner
 import inverse_dynamics as id
