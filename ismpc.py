@@ -144,7 +144,7 @@ class Ismpc:
     self.d_ax = self.opt_xy.parameter(self.f_max)
     self.d_ay = self.opt_xy.parameter(self.f_max)
 
-    self.l = self.params["l"]  # NOTE - add l to params
+    self.l = self.params["l"]
     self.l_sign = self.opt_xy.parameter(self.f_max)
 
     self.curr_sup_x = self.opt_xy.parameter()
@@ -165,7 +165,20 @@ class Ismpc:
         self.opt_xy.subject_to(dy - (self.l * self.l_sign[i]) <= self.d_ay[i] / 2)
         self.opt_xy.subject_to(dy - (self.l * self.l_sign[i]) >= -self.d_ay[i] / 2)
 
-    # proposition 2
+    # swing foot constraint
+    self.curr_swg_x = self.opt_xy.parameter()
+    self.curr_swg_y = self.opt_xy.parameter()
+    self.max_reach = self.opt_xy.parameter()
+
+    # X axis
+    self.opt_xy.subject_to(self.x_f[0] - self.curr_swg_x <= self.max_reach)
+    self.opt_xy.subject_to(self.curr_swg_x - self.x_f[0] <= self.max_reach)
+
+    # Y axis
+    self.opt_xy.subject_to(self.y_f[0] - self.curr_swg_y <= self.max_reach)
+    self.opt_xy.subject_to(self.curr_swg_y - self.y_f[0] <= self.max_reach)
+
+    # stability constraint
     self.eta_lip_param = self.opt_xy.parameter()
     g_val = cs.horzcat(1, 1 / self.eta_lip_param)
 
@@ -233,10 +246,30 @@ class Ismpc:
 
     x_cf, y_cf, p_min_x, p_max_x, p_min_y, p_max_y, d_ax, d_ay, signs = self.generate_step_params(t)
     idx = self.footstep_planner.get_step_index_at_time(t)
+    phase = self.footstep_planner.get_phase_at_time(t)
+
     swing_foot = self.footstep_planner.plan[idx]['foot_id']
     sup_foot = 'lfoot' if swing_foot == 'rfoot' else 'rfoot'
     curr_sup_x = current[sup_foot]['pos'][3]
     curr_sup_y = current[sup_foot]['pos'][4]
+    curr_swg_x = current[swing_foot]['pos'][3]
+    curr_swg_y = current[swing_foot]['pos'][4]
+
+    if phase == 'ss':
+        start_time = self.footstep_planner.get_start_time(idx)
+        ss_duration = self.footstep_planner.plan[idx]['ss_duration']
+
+        rem_steps = (start_time + ss_duration) - t
+        rem_time = max(0, rem_steps * self.delta) # [s]
+
+        v_sw_max = self.params['v_sw_max']
+        max_reach_th = rem_time * v_sw_max
+        if rem_steps <= 3:
+            max_reach = 1e5
+        else:
+            max_reach = max(max_reach_th, 0.05)
+    else:
+        max_reach = 1e5
 
     # warm start
     if not hasattr(self, 'qp_xy_warm_started'):
@@ -264,6 +297,9 @@ class Ismpc:
     self.opt_xy.set_value(self.l_sign, signs)
     self.opt_xy.set_value(self.curr_sup_x, curr_sup_x)
     self.opt_xy.set_value(self.curr_sup_y, curr_sup_y)
+    self.opt_xy.set_value(self.curr_swg_x, curr_swg_x)
+    self.opt_xy.set_value(self.curr_swg_y, curr_swg_y)
+    self.opt_xy.set_value(self.max_reach, max_reach)
 
     # alpha_j: maps optimized footstep positions to per-timestep ZMP references
     alpha_val = self.compute_alpha_j(t)
@@ -412,10 +448,11 @@ class Ismpc:
             d_ay[i] = 1e5
         else:
             # Minkowski patch
-            p_min_x[i] = x_cf[i] - 0.1
-            p_max_x[i] = x_cf[i] + 0.1
-            p_min_y[i] = y_cf[i] - 0.1
-            p_max_y[i] = y_cf[i] + 0.1
+            margin = self.foot_size / 2
+            p_min_x[i] = x_cf[i] - 0.1 + margin
+            p_max_x[i] = x_cf[i] + 0.1 - margin
+            p_min_y[i] = y_cf[i] - 0.1 + margin
+            p_max_y[i] = y_cf[i] + 0.1 - margin
 
             dz = abs(step['pos'][2] - prev_step['pos'][2])
             scaling = (1 - sigma * (dz / dz_max))

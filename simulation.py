@@ -26,6 +26,7 @@ class Hrp4Controller(dart.gui.osg.RealTimeWorldNode):
             'step_height': 0.15,
             'ss_duration': 70,
             'ds_duration': 30,
+            'v_sw_max' : 2.0,
             'f_max': 3,
             'l': 0.25,
             'world_time_step': world.getTimeStep(),
