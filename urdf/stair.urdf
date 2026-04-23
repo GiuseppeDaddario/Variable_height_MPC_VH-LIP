@@ -1,29 +1,77 @@
 <?xml version="1.0"?>
-<robot name="stair_skeleton">
-    <link name="world" />
-    <link name="stair_link">
-        <inertial>
-            <mass value="100.0" />
-            <origin xyz="0 0 0" rpy="0 0 0" />
-            <inertia ixx="10.0" ixy="0" ixz="0" iyy="10.0" iyz="0" izz="10.0" />
-        </inertial>
-        <visual>
-            <origin xyz="-2 0 0" rpy="0 0 0" />
-            <material name="brown"><color rgba="0.6 0.4 0.2 1"/></material>
-            <geometry>
-                <box size="1.0 2.0 0.1" />
-            </geometry>
-        </visual>
-        <collision>
-            <origin xyz="-2 0 0" rpy="0 0 0" />
-            <geometry>
-                <box size="1.0 2.0 0.1" />
-            </geometry>
-        </collision>
-    </link>
-    <joint name="stair_joint" type="fixed">
-        <origin xyz="2.9 0 0.05" rpy="0 0 0" />
-        <parent link="world" />
-        <child link="stair_link" />
-    </joint>
+<robot name="stair_2_steps">
+
+  <material name="grey">
+    <color rgba="1 1 0.7 1"/>
+  </material>
+
+  <link name="world"/>
+
+  <joint name="fixed_to_world" type="fixed">
+    <parent link="world"/>
+    <child link="base_link"/>
+    <origin xyz="0.45 0 0" rpy="0 0 0"/>
+  </joint>
+  <link name="base_link" />
+
+  <link name="step_1">
+    <visual>
+      <origin xyz="0.2 0 0.075" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.4 1.0 0.15"/>
+      </geometry>
+      <material name="grey"/>
+    </visual>
+    <collision>
+      <origin xyz="0.2 0 0.075" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.4 1.0 0.15"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="base_to_step_1" type="fixed">
+    <parent link="base_link"/>
+    <child link="step_1"/>
+  </joint>
+
+  <link name="step_2_top">
+    <visual>
+      <origin xyz="0.8 0 0.15" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.8 1.0 0.30"/>
+      </geometry>
+      <material name="grey"/>
+    </visual>
+    <collision>
+      <origin xyz="0.8 0 0.15" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.8 1.0 0.30"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="base_to_step_2" type="fixed">
+    <parent link="base_link"/>
+    <child link="step_2_top"/>
+  </joint>
+
+  <link name="step_3">
+    <visual>
+      <origin xyz="1.4 0 0.075" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.4 1.0 0.15"/>
+      </geometry>
+      <material name="grey"/>
+    </visual>
+    <collision>
+      <origin xyz="1.4 0 0.075" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.4 1.0 0.15"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="base_to_step_3" type="fixed">
+    <parent link="base_link"/>
+    <child link="step_3"/>
+  </joint>
+
 </robot>
