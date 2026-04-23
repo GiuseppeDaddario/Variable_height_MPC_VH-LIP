@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<robot name="obstacle">
+  <link name="world"/>
+  <joint name="fixed_joint" type="fixed">
+    <parent link="world"/>
+    <child link="obstacle_link"/>
+    <origin xyz="0.9 0.0 1.4" rpy="0 0 0"/>
+  </joint>
+
+  <link name="obstacle_link">
+    <visual>
+      <geometry>
+        <box size="0.2 1.5 0.3"/> </geometry>
+      <material name="red">
+        <color rgba="0.8 0.1 0.1 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="0.2 1.5 0.3"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0"/>
+      <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0"/>
+    </inertial>
+  </link>
+</robot>

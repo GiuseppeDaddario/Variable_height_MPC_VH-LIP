@@ -90,20 +90,49 @@ class Hrp4Controller(dart.gui.osg.RealTimeWorldNode):
             "NECK_Y", "NECK_P", \
             "R_SHOULDER_P", "R_SHOULDER_R", "R_SHOULDER_Y", "R_ELBOW_P", \
             "L_SHOULDER_P", "L_SHOULDER_R", "L_SHOULDER_Y", "L_ELBOW_P"]
-        
+
         # initialize inverse dynamics
         self.id = id.InverseDynamics(self.hrp4, redundant_dofs)
 
         # initialize footstep planner
-        reference = ([(0.10, 0., 0.)] * 4
-                + [(0.01, 0., 0.)]
-                + [(0.3, 0., 0., 0.1, 0.42)]
-                + [(0.10, 0., 0., 0.0, 0.22)] * 6
-                + [(0.15, 0., 0., 0.0, 0.22)]
-                + [(0.33, 0., 0., -0.1, 0.1)]
-                + [(0.15, 0., 0.)] * 3
-                + [(0.0, 0., 0.)])       
-            
+        # avoids the obstacle and walks on the box
+        reference = ([(0.10, 0., 0.)] * 2
+                     + [(0.15, 0., 0., 0.0, 0.72)] * 2
+                     + [(0.15, 0., 0., 0.0, 0.35)] * 4
+                     + [(0.15, 0., 0.)] * 6
+                     + [(0.3, 0., 0., 0.1, 0.75)]
+                     + [(0.05, 0., 0.)]
+                     + [(0.13, 0., 0.)] * 4
+                     + [(0.1, 0., 0., 0.0, 0.20)]
+                     + [(0.1, 0., 0.)]
+                     + [(0.35, 0., 0., -0.1, 0.7)]
+                     + [(0.1, 0., 0.)]
+                     + [(0.15, 0., 0.)] * 3
+                     )
+        '''
+
+        # up and down the stairs
+        reference = ([(0.10, 0., 0.)] * 2
+                     + [(0.1, 0., 0.)] * 3
+                     + [(0.3, 0., 0., 0.15, 1.02)]
+                     + [(0.0, 0., 0., 0., 1.02)]
+                     + [(0.1, 0., 0., 0., 0.8)]
+                     + [(0.0, 0., 0., 0., 0.7)]
+                     + [(0.3, 0., 0., 0.15, 0.7)]
+                     + [(0.0, 0., 0., 0., 0.8)]
+                     + [(0.1, 0., 0., 0., 0.7)]
+                     + [(0.1, 0., 0., 0.0, 0.5)] * 4
+                     + [(0.32, 0., 0., -0.15, 0.5)]
+                     + [(0.0, 0., 0., 0., 0.5)]
+                     + [(0.1, 0., 0., 0., 0.4)]
+                     + [(0.0, 0., 0., 0., 0.4)]
+                     + [(0.3, 0., 0., -0.15, 0.4)]
+                     + [(0.0, 0., 0., 0., 0.9)]
+                     + [(0.1, 0., 0., 0., 0.8)] * 3
+                     + [(0.1, 0., 0.)]
+                     )
+'''
+
         self.footstep_planner = footstep_planner.FootstepPlanner(
             reference,
             self.initial['lfoot']['pos'],
@@ -154,9 +183,44 @@ class Hrp4Controller(dart.gui.osg.RealTimeWorldNode):
         # create current and desired states
         self.current = self.retrieve_state()
 
+        delta = self.params['world_time_step']
+        ddot_z = self.desired['com']['acc'][2]
+        com_z = self.desired['com']['pos'][2]
+        zmp_z = self.desired['zmp']['pos'][2]
+
+        # compute lambda
+        denom = com_z - zmp_z
+        denom = 1e-6 if abs(denom) < 1e-6 else denom
+        lambda_val = (ddot_z + self.params['g']) / denom
+        lambda_val = max(lambda_val, 1e-4)
+
+        # compute matrices and drift
+        A_xy = np.array([
+            [1.0, delta, 0.0],
+            [delta * lambda_val, 1.0, -delta * lambda_val],
+            [0.0, 0.0, 1.0]
+        ])
+
+        A_z = np.array([
+            [1.0, delta, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0]
+        ])
+
+        B_axis = np.array([
+            [0.0],
+            [0.0],
+            [delta]
+        ])
+
+        A_tv = block_diag(A_xy, A_xy, A_z)
+        B_tv = block_diag(B_axis, B_axis, B_axis)
+        d_tv = np.zeros(9)
+        d_tv[7] = delta * ddot_z
+
         # update kalman filter
         u = np.array([self.desired['zmp']['vel'][0], self.desired['zmp']['vel'][1], self.desired['zmp']['vel'][2]])
-        self.kf.predict(u)
+        self.kf.predict(u, A=A_tv, B=B_tv, d=d_tv)
         x_flt, _ = self.kf.update(np.array([self.current['com']['pos'][0], self.current['com']['vel'][0], self.current['zmp']['pos'][0], \
                                             self.current['com']['pos'][1], self.current['com']['vel'][1], self.current['zmp']['pos'][1], \
                                             self.current['com']['pos'][2], self.current['com']['vel'][2], self.current['zmp']['pos'][2]]))
@@ -204,6 +268,13 @@ class Hrp4Controller(dart.gui.osg.RealTimeWorldNode):
         #self.logger.update_plot(self.time)
 
         self.time += 1
+
+        # dynamic camera
+        if hasattr(self, 'viewer'):
+            com = self.hrp4.getCOM()
+            eye_pos = [com[0] + 4.5, com[1] - 3.5, com[2] + 0.2]
+            target_pos = [com[0] - 1.0, com[1] + 1.5, com[2] + 0.2]
+            self.viewer.setCameraHomePosition(eye_pos, target_pos, [0., 0., 1.])
 
     def retrieve_state(self):
         # com and torso pose (orientation and position)
@@ -282,10 +353,14 @@ if __name__ == "__main__":
     current_dir = os.path.dirname(os.path.abspath(__file__))
     hrp4   = urdfParser.parseSkeleton(os.path.join(current_dir, "urdf", "hrp4.urdf"))
     ground = urdfParser.parseSkeleton(os.path.join(current_dir, "urdf", "ground.urdf"))
-    stair  = urdfParser.parseSkeleton(os.path.join(current_dir, "urdf", "stair.urdf"))
+    box = urdfParser.parseSkeleton(os.path.join(current_dir, "urdf", "box.urdf"))
+    obstacle = urdfParser.parseSkeleton(os.path.join(current_dir, "urdf", "obstacle.urdf"))
+    # stair  = urdfParser.parseSkeleton(os.path.join(current_dir, "urdf", "stair.urdf"))
     world.addSkeleton(hrp4)
     world.addSkeleton(ground)
-    world.addSkeleton(stair)
+    world.addSkeleton(box)
+    world.addSkeleton(obstacle)
+    #world.addSkeleton(stair)
     world.setGravity([0, 0, -9.81])
     world.setTimeStep(0.01)
 
@@ -300,13 +375,12 @@ if __name__ == "__main__":
 
     # create world node and add it to viewer
     viewer = dart.gui.osg.Viewer()
+    node.viewer = viewer
     node.setTargetRealTimeFactor(40) # speed up the visualization by 40x
     viewer.addWorldNode(node)
 
     #viewer.setUpViewInWindow(0, 0, 1920, 1080)
-    viewer.setUpViewInWindow(0, 0, 1280, 720)
+    viewer.setUpViewInWindow(0, 0, 1280, 800)
     #viewer.setUpViewInWindow(0, 0, 640, 480)
-    viewer.setCameraHomePosition([5., -1., 1.5],
-                                 [1.,  0., 0.5],
-                                 [0.,  0., 1. ])
+
     viewer.run()

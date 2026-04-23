@@ -11,9 +11,13 @@ class KalmanFilter:
         self.P = P # estimate error covariance
         self.x = x # state estimate
 
-    def predict(self, u):
-        self.x = self.A @ self.x + self.B @ u + self.d
-        self.P = self.A @ self.P @ self.A.T + self.Q
+    def predict(self, u, A=None, B=None, d=None):
+        current_A = A if A is not None else self.A
+        current_B = B if B is not None else self.B
+        current_d = d if d is not None else self.d
+
+        self.x = current_A @ self.x + current_B @ u + current_d
+        self.P = current_A @ self.P @ current_A.T + self.Q
         return self.x, self.P
 
     def update(self, z):
